@@ -28,6 +28,11 @@ class ModelName(str, Enum):
     GPT_4O_TRANSCRIBE = "gpt-4o-transcribe"
 
 
+@app.get("/")
+async def root():
+    return {"message": "This is the root endpoint of Jin-T Backend"}
+
+
 @app.post("/transcribe")
 async def convert_audio_to_text(
     audio_file: Annotated[UploadFile, File()],
