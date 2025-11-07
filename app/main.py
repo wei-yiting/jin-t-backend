@@ -38,7 +38,8 @@ async def convert_audio_to_text(
     translation = await client.audio.transcriptions.create(
         model=model_name.value,
         file=(audio_file.filename, audio_file.file),
-        prompt="""語音中的中文語句中間可能夾雜英文，保留英文部分不需翻譯直接轉換為英文文字，中文部分用台灣使用的繁體中文呈現。
+        prompt="""語音中的中文語句可能夾雜英文，保留英文部分不需翻譯直接轉換為英文文字，中文部分用台灣使用的繁體中文呈現。
+        中英交錯時英文開始前與結束後應各加上一個空格，例如“這是 Speech to Text 工具”。
         依據語氣和語句順暢度，使用合適的標點符號。""",
     )
 

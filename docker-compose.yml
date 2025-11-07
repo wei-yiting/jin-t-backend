@@ -1,0 +1,6 @@
+services:
+  backend:
+    build:
+      context: .
+    ports:
+      - 8001:8000
