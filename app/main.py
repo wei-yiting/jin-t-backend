@@ -52,6 +52,6 @@ async def convert_audio_to_text(
     return {"transcription": translation.text}
 
 
-@app.get("/health-check")
+@app.api_route("/health-check", methods=["GET", "HEAD"])
 async def health_check():
     return {"message": "OK"}
