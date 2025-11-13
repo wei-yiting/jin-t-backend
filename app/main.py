@@ -50,3 +50,8 @@ async def convert_audio_to_text(
     )
 
     return {"transcription": translation.text}
+
+
+@app.get("/health-check")
+async def health_check():
+    return {"message": "OK"}
