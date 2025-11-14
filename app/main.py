@@ -4,6 +4,9 @@ from typing import Annotated
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
+from utils.string_operation import add_spacing_between_chinese_english
+
+from app.prompts import TRANSCRIBE_PROMPT
 
 app = FastAPI()
 
@@ -42,15 +45,15 @@ async def convert_audio_to_text(
     model_name: Annotated[ModelName, Form()],
 ):
     client = AsyncOpenAI(api_key=openai_api_key)
-    translation = await client.audio.transcriptions.create(
+    raw_transcription = await client.audio.transcriptions.create(
         model=model_name.value,
         file=(audio_file.filename, audio_file.file),
-        prompt="""語音中的中文語句可能夾雜英文，保留英文部分不需翻譯直接轉換為英文文字，中文部分用台灣使用的繁體中文呈現。
-        中英交錯時英文開始前與結束後應各加上一個空格，例如“這是 Speech to Text 工具”。
-        依據語氣和語句順暢度，使用合適的標點符號。""",
+        prompt=TRANSCRIBE_PROMPT,
     )
 
-    return {"transcription": translation.text}
+    final_transcription = add_spacing_between_chinese_english(raw_transcription.text)
+
+    return {"transcription": final_transcription}
 
 
 @app.api_route("/health-check", methods=["GET", "HEAD"])
