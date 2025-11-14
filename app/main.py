@@ -4,13 +4,11 @@ from typing import Annotated
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
-from utils.string_operation import add_spacing_between_chinese_english
 
 from app.prompts import TRANSCRIBE_PROMPT
+from app.utils import add_spacing_between_chinese_english
 
 app = FastAPI()
-
-# TODO: add audio file size validation (error handling)
 
 origins = [
     "http://localhost:3000",
