@@ -13,6 +13,7 @@ origins = [
     "http://localhost:3000",
     "http://localhost:3001",
     "https://jin-t-frontend.vercel.app",
+    "https://jin-t.vercel.app",
 ]
 
 app.add_middleware(
