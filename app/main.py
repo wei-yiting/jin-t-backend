@@ -49,24 +49,28 @@ async def convert_audio_to_text(
     client = AsyncOpenAI(api_key=openai_api_key)
 
     # 1. Transcribe audio to text
-    raw_transcript = await client.audio.transcriptions.create(
+    response_from_transcribe = await client.audio.transcriptions.create(
         model=model_name.value,
         file=(audio_file.filename, audio_file.file),
         prompt=TRANSCRIBE_PROMPT,
     )
+    raw_transcript = response_from_transcribe.text
 
     # 2. Convert simplified Chinese to traditional Chinese if any
-    post_processed_transcript = convert(raw_transcript.text, "zh-tw")
+    post_processed_transcript = convert(raw_transcript, "zh-tw")
 
     # 3. Add spacing between Chinese and English/numbers/English punctuation marks
     post_processed_transcript = add_spacing_between_chinese_english(
         post_processed_transcript
     )
 
+    print(f"Post-processed transcript: {post_processed_transcript}")
+
     # 4. Check if the punctuation is healthy, if not, fix it with GPT-4o-mini
     if not check_transcript_punctuation_health(post_processed_transcript):
-        print("Punctuation is unhealthy, fixing...")
-        print(f"Original transcript: {post_processed_transcript}")
+        print(
+            "********* Punctuation is unhealthy, fixing with GPT-4o-mini... *********"
+        )
         response_with_punctuation_fix = await client.responses.create(
             model="gpt-4o-mini",
             instructions=TRANSCRIPT_PUNC_FIX_INSTRUCTION_PROMPT,
