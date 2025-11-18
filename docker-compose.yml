@@ -1,6 +1,8 @@
 services:
-  backend:
+  web-server:
     build:
       context: .
+    env_file:
+      - .env
     ports:
-      - 8000:10000
+      - 8003:10000

@@ -1,3 +1,4 @@
+import os
 from enum import Enum
 from typing import Annotated
 
@@ -14,16 +15,14 @@ from app.utils import (
 
 app = FastAPI()
 
-origins = [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "https://jin-t-frontend.vercel.app",
-    "https://jin-t.vercel.app",
+allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "")
+allowed_origins = [
+    origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "HEAD", "POST"],
     allow_headers=["*"],
