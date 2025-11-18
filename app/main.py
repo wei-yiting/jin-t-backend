@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 from zhconv import convert  # type: ignore
 
-from app.prompts import TRANSCRIBE_PROMPT, TRANSCRIPT_PUNC_FIX_INSTRUCTION_PROMPT
+from app.prompt_reader import read_prompt
 from app.utils import (
     add_spacing_between_chinese_english,
     check_transcript_punctuation_health,
@@ -48,10 +48,15 @@ async def convert_audio_to_text(
     client = AsyncOpenAI(api_key=openai_api_key)
 
     # 1. Transcribe audio to text
+    transcript_prompt = read_prompt(
+        os.path.join(
+            os.path.dirname(__file__), os.getenv("TRANSCRIBE_PROMPT_FILE_PATH", "")
+        )
+    )
     response_from_transcribe = await client.audio.transcriptions.create(
         model=model_name.value,
         file=(audio_file.filename, audio_file.file),
-        prompt=TRANSCRIBE_PROMPT,
+        prompt=transcript_prompt,
     )
     raw_transcript = response_from_transcribe.text
 
@@ -70,11 +75,17 @@ async def convert_audio_to_text(
         print(
             "********* Punctuation is unhealthy, fixing with GPT-4o-mini... *********"
         )
+
+        punc_fix_instruction_prompt = read_prompt(
+            os.path.join(
+                os.path.dirname(__file__), os.getenv("PUNC_FIX_PROMPT_FILE_PATH", "")
+            )
+        )
         response_with_punctuation_fix = await client.responses.create(
-            model="gpt-4o-mini",
-            instructions=TRANSCRIPT_PUNC_FIX_INSTRUCTION_PROMPT,
+            model=os.getenv("PUNC_FIX_MODEL_NAME", ""),
+            instructions=punc_fix_instruction_prompt,
             input=post_processed_transcript,
-            temperature=0.0,
+            temperature=float(os.getenv("PUNC_FIX_TEMPERATURE", "0.2")),
         )
 
         post_processed_transcript = response_with_punctuation_fix.output_text
