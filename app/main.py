@@ -7,10 +7,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 from zhconv import convert  # type: ignore
 
-from app.prompt_reader import read_prompt
+from app.config import (
+    PUNC_FIX_MODEL_NAME,
+    PUNC_FIX_PROMPT_FILE_PATH,
+    PUNC_FIX_TEMPERATURE,
+    TRANSCRIBE_PROMPT_FILE_PATH,
+)
 from app.utils import (
     add_spacing_between_chinese_english,
     check_transcript_punctuation_health,
+    read_prompt,
 )
 
 app = FastAPI()
@@ -49,9 +55,7 @@ async def convert_audio_to_text(
 
     # 1. Transcribe audio to text
     transcript_prompt = read_prompt(
-        os.path.join(
-            os.path.dirname(__file__), os.getenv("TRANSCRIBE_PROMPT_FILE_PATH", "")
-        )
+        os.path.join(os.path.dirname(__file__), TRANSCRIBE_PROMPT_FILE_PATH)
     )
     response_from_transcribe = await client.audio.transcriptions.create(
         model=model_name.value,
@@ -77,15 +81,13 @@ async def convert_audio_to_text(
         )
 
         punc_fix_instruction_prompt = read_prompt(
-            os.path.join(
-                os.path.dirname(__file__), os.getenv("PUNC_FIX_PROMPT_FILE_PATH", "")
-            )
+            os.path.join(os.path.dirname(__file__), PUNC_FIX_PROMPT_FILE_PATH)
         )
         response_with_punctuation_fix = await client.responses.create(
-            model=os.getenv("PUNC_FIX_MODEL_NAME", ""),
+            model=PUNC_FIX_MODEL_NAME,
             instructions=punc_fix_instruction_prompt,
             input=post_processed_transcript,
-            temperature=float(os.getenv("PUNC_FIX_TEMPERATURE", "0.2")),
+            temperature=PUNC_FIX_TEMPERATURE,
         )
 
         post_processed_transcript = response_with_punctuation_fix.output_text
