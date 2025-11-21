@@ -24,7 +24,6 @@ pydantic==2.12.4
 pydantic_core==2.41.5
 Pygments==2.19.2
 python-dotenv==1.2.1
-python-json-logger==4.0.0
 python-multipart==0.0.20
 PyYAML==6.0.3
 rich==14.2.0

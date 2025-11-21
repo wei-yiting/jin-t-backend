@@ -1,5 +1,4 @@
 import os
-import logging
 from enum import Enum
 from typing import Annotated
 
@@ -7,8 +6,6 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 from zhconv import convert  # type: ignore
-
-from app.json_logger import setup_json_logger
 
 from app.config import (
     PUNC_FIX_MODEL_NAME,
@@ -21,9 +18,6 @@ from app.utils import (
     check_transcript_punctuation_health,
     read_prompt,
 )
-
-setup_json_logger()
-logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -44,6 +38,11 @@ app.add_middleware(
 class ModelName(str, Enum):
     GPT_4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
     GPT_4O_TRANSCRIBE = "gpt-4o-transcribe"
+
+
+@app.get("/")
+async def root():
+    return {"message": "This is the root endpoint of Jin-T Backend"}
 
 
 @app.post("/transcribe")
@@ -73,13 +72,13 @@ async def convert_audio_to_text(
         post_processed_transcript
     )
 
-    logger.info(f"Post-processed transcript: {post_processed_transcript}")
+    # print(f"Post-processed transcript: {post_processed_transcript}")
 
     # 4. Check if the punctuation is healthy, if not, fix it with GPT-4o-mini
     if not check_transcript_punctuation_health(post_processed_transcript):
-        logger.info(
-            "********* Punctuation is unhealthy, fixing with GPT-4o-mini... *********"
-        )
+        # print(
+        #     "********* Punctuation is unhealthy, fixing with GPT-4o-mini... *********"
+        # )
 
         punc_fix_instruction_prompt = read_prompt(
             os.path.join(os.path.dirname(__file__), PUNC_FIX_PROMPT_FILE_PATH)
@@ -92,8 +91,7 @@ async def convert_audio_to_text(
         )
 
         post_processed_transcript = response_with_punctuation_fix.output_text
-
-        logger.info(f"Fixed transcript: {post_processed_transcript}")
+        # print(f"Fixed transcript: {post_processed_transcript}")
 
     return {"transcript": post_processed_transcript}
 
