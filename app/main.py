@@ -39,9 +39,15 @@ async def convert_audio_to_text(
     audio_file: Annotated[UploadFile, File()],
     openai_api_key: Annotated[str, Form()],
     model_name: Annotated[LLMModelName, Form()],
+    audio_duration: Annotated[str | None, Form()] = None,
 ):
     client = AsyncOpenAI(api_key=openai_api_key)
-    result = await run_transcription_pipeline(audio_file, client, model_name.value)
+    result = await run_transcription_pipeline(
+        audio_file=audio_file,
+        llm_client=client,
+        transcribe_model_name=model_name.value,
+        audio_duration=audio_duration,
+    )
     return {"transcript": result}
 
 

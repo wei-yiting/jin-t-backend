@@ -11,7 +11,7 @@ from app.config import (
     PUNC_FIX_TEMPERATURE,
     TRANSCRIBE_PROMPT_FILE_PATH,
 )
-from app.utils import read_prompt
+from app.lib.prompt_utils import read_prompt
 
 
 @traceable(run_type="llm", name="LLM1_Transcribe")
