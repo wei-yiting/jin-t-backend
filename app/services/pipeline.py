@@ -6,8 +6,8 @@ from fastapi import UploadFile
 
 from openai import AsyncOpenAI
 
+from app.config import PUNC_FIX_MODEL_NAME
 from app.services.llm_client import transcribe_audio_to_text, fix_punctuation
-
 from app.services.text_tools import (
     check_transcript_punctuation_health,
     convert_simplified_to_traditional,
@@ -19,7 +19,7 @@ from app.services.text_tools import (
 async def run_transcription_pipeline(
     audio_file: UploadFile,
     client: AsyncOpenAI,
-    model_name: str,
+    transcribe_model_name: str,
 ):
     client = wrap_openai(client)
     run_tree = get_current_run_tree()
@@ -27,11 +27,16 @@ async def run_transcription_pipeline(
 
     # 1. Transcribe audio to text
     response_from_transcribe = await transcribe_audio_to_text(
-        audio_file, model_name, client
+        audio_file, transcribe_model_name, client
     )
     raw_transcript = response_from_transcribe.text
 
-    run_tree_metadata.update({"raw_transcript": raw_transcript})
+    run_tree_metadata.update(
+        {
+            "raw_transcript": raw_transcript,
+            "transcribe_model_name": transcribe_model_name,
+        }
+    )
 
     # 2. Convert simplified Chinese to traditional Chinese if any
     post_processed_transcript = convert_simplified_to_traditional(raw_transcript)
@@ -55,10 +60,15 @@ async def run_transcription_pipeline(
     run_tree_metadata.update({"has_punctuation_fixed": has_punctuation_fixed})
     if has_punctuation_fixed:
         run_tree_metadata.update(
-            {"punctuation_fixed_transcript": post_processed_transcript}
+            {
+                "punctuation_fixed_transcript": post_processed_transcript,
+                "punc_fix_model_name": PUNC_FIX_MODEL_NAME,
+            }
         )
     else:
-        run_tree_metadata.update({"punctuation_fixed_transcript": None})
+        run_tree_metadata.update(
+            {"punctuation_fixed_transcript": None, "punc_fix_model_name": None}
+        )
 
     if run_tree:
         run_tree.add_metadata(run_tree_metadata)

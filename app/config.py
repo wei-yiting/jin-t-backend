@@ -1,5 +1,5 @@
 # Model names
-PUNC_FIX_MODEL_NAME = "gpt-4o-mini"
+PUNC_FIX_MODEL_NAME = "gpt-4.1-nano"
 
 # Model temperatures
 PUNC_FIX_TEMPERATURE = 0.0
