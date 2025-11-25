@@ -1,12 +1,11 @@
 import os
-from enum import Enum
 from typing import Annotated
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 from app.services.pipeline import run_transcription_pipeline
-
+from app.models import TranscribeMode
 
 app = FastAPI()
 
@@ -29,23 +28,18 @@ async def root():
     return {"message": "This is the root endpoint of Jin-T Backend"}
 
 
-class LLMModelName(str, Enum):
-    GPT_4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
-    GPT_4O_TRANSCRIBE = "gpt-4o-transcribe"
-
-
 @app.post("/transcribe")
 async def convert_audio_to_text(
     audio_file: Annotated[UploadFile, File()],
     openai_api_key: Annotated[str, Form()],
-    model_name: Annotated[LLMModelName, Form()],
+    transcribe_mode: Annotated[TranscribeMode, Form()],
     audio_duration: Annotated[str | None, Form()] = None,
 ):
     client = AsyncOpenAI(api_key=openai_api_key)
     result = await run_transcription_pipeline(
         audio_file=audio_file,
         llm_client=client,
-        transcribe_model_name=model_name.value,
+        transcribe_mode=transcribe_mode,
         audio_duration=audio_duration,
     )
     return {"transcript": result}

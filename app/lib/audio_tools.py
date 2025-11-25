@@ -1,9 +1,11 @@
 from fastapi import UploadFile
 from langsmith import traceable
 
+from app.models import AudioMetadataFromRequest
+
 
 @traceable(run_type="tool", name="Get_Audio_File_Metadata")
-def get_audio_metadata(audio_file: UploadFile) -> dict[str, float | str | None]:
+def get_audio_metadata(audio_file: UploadFile) -> AudioMetadataFromRequest:
     content_type = audio_file.content_type
     raw_file = audio_file.file
 
