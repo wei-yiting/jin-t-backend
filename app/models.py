@@ -1,5 +1,6 @@
 from enum import Enum
 from typing import TypedDict
+from pydantic import BaseModel
 
 
 class TranscribeMode(str, Enum):
@@ -24,3 +25,12 @@ class LangsmithRunTreeMetadata(AudioMetadataFromRequest, total=False):
     punc_fix_model_name: str | None
     refined_transcript: str | None
     refine_model_name: str | None
+
+
+class CheckIsOpenaiApiKeyValidRequest(BaseModel):
+    openai_api_key: str
+
+
+class CheckIsOpenaiApiKeyValidResponse(BaseModel):
+    is_api_key_valid: bool
+    has_unexpectied_validation_error: bool
