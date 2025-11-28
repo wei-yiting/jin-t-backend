@@ -1,9 +1,9 @@
 import os
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from openai import AsyncOpenAI, AuthenticationError
+from openai import AsyncOpenAI, AuthenticationError, BadRequestError
 from app.services.pipeline import run_transcription_pipeline
 from app.models import (
     TranscribeMode,
@@ -39,14 +39,51 @@ async def convert_audio_to_text(
     transcribe_mode: Annotated[TranscribeMode, Form()],
     audio_duration: Annotated[str | None, Form()] = None,
 ):
-    client = AsyncOpenAI(api_key=openai_api_key)
-    result = await run_transcription_pipeline(
-        audio_file=audio_file,
-        llm_client=client,
-        transcribe_mode=transcribe_mode,
-        audio_duration=audio_duration,
-    )
-    return {"transcript": result}
+    # Validate audio file
+    if not audio_file.filename:
+        raise HTTPException(status_code=400, detail="No audio file provided")
+
+    # Check file size (must be > 100 bytes for valid audio)
+    file_content = await audio_file.read()
+    file_size = len(file_content)
+
+    if file_size < 100:
+        raise HTTPException(
+            status_code=400, detail="Audio file is too small or corrupted"
+        )
+
+    # Reset file pointer for processing
+    await audio_file.seek(0)
+
+    try:
+        client = AsyncOpenAI(api_key=openai_api_key)
+        result = await run_transcription_pipeline(
+            audio_file=audio_file,
+            llm_client=client,
+            transcribe_mode=transcribe_mode,
+            audio_duration=audio_duration,
+        )
+        return {"transcript": result}
+    except BadRequestError as e:
+        # OpenAI API returned 400 (corrupted/unsupported audio file)
+        error_message = str(e)
+        if (
+            "corrupted" in error_message.lower()
+            or "unsupported" in error_message.lower()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Audio file is corrupted or in an unsupported format",
+            )
+        raise HTTPException(status_code=400, detail=error_message)
+    except AuthenticationError:
+        raise HTTPException(status_code=401, detail="Invalid OpenAI API key")
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Unexpected error in transcription: {e}")
+        raise HTTPException(
+            status_code=500, detail="An unexpected error occurred during transcription"
+        )
 
 
 @app.post("/check-openai-api-key")
