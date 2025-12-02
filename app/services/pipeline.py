@@ -22,7 +22,7 @@ from app.services.llm_client import (
 
 
 @traceable(run_type="chain", name="JinT_Main_Pipeline")
-async def run_transcription_pipeline(
+async def run_transcribe_pipeline(
     audio_file: UploadFile,
     llm_client: AsyncOpenAI,
     transcribe_mode: TranscribeMode,
