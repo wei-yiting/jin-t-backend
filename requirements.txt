@@ -57,6 +57,7 @@ python-json-logger==4.0.0
 python-multipart==0.0.20
 PyYAML==6.0.3
 realtime==2.24.0
+redis==6.4.0
 regex==2025.11.3
 requests==2.32.5
 requests-toolbelt==1.0.0

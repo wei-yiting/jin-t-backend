@@ -3,6 +3,10 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import transcribe, api_key, livez
+from redis.asyncio import Redis
+
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+redis_client = Redis.from_url(redis_url, decode_responses=True)
 
 app = FastAPI()
 
