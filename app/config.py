@@ -20,3 +20,7 @@ TRANSCRIPT_REFINE_PROMPT_FILE_PATH = "prompts/transcript_refine_instruction.txt"
 FULL_WIDTH_PUNCS = {"。", "，", "？", "！", "、", "；", "："}
 HALF_WIDTH_PUNCS = {".", ",", "?", "!", ";", ":"}
 FINAL_PUNCS = {"。", "？", "！", ".", "?", "!", "..."}
+
+# Validation limits
+MAX_FILE_SIZE_MB = 25
+FREE_TIER_MAX_AUDIO_DURATION_SECONDS = 600  # 10 minutes
