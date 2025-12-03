@@ -5,7 +5,6 @@ from typing import Annotated
 
 from fastapi import Header, HTTPException, Request, UploadFile, Depends, File
 from redis.asyncio import Redis
-from pydantic import BaseModel
 
 from app.config import (
     FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS,
@@ -14,31 +13,7 @@ from app.config import (
 from app.lib.retry_time_generator import get_formatted_retry_time_in_taipei_timezone
 from app.lib.audio_tools import parse_audio_duration
 from app.lib.rate_limit_rules import get_rate_limit_rules
-
-
-class ApiKeyConfig(BaseModel):
-    """Configuration for API key usage."""
-
-    api_key_to_use: str
-    using_free_tier: bool
-
-    class Config:
-        # Exclude from OpenAPI schema since this is internal only
-        # and contains sensitive information
-        json_schema_extra = {"exclude": True}
-
-
-class ValidatedAudioFile(BaseModel):
-    """Validated audio file information."""
-
-    file: UploadFile
-    file_size_bytes: int
-    file_size_mb: float
-
-    class Config:
-        # Exclude from OpenAPI schema since UploadFile is not serializable
-        json_schema_extra = {"exclude": True}
-        arbitrary_types_allowed = True
+from app.models import ValidatedAudioFile, UsageConfig
 
 
 async def validate_audio_file(
@@ -81,15 +56,17 @@ async def validate_file_size(
     return validated_audio
 
 
-def get_api_key_config(
+def get_usage_config(
     personal_openai_api_key: Annotated[str, Header(alias="X-Custom-Openai-Api-Key")],
     consent_data_collection: Annotated[str, Header(alias="X-Consent-Data-Collection")],
-) -> ApiKeyConfig:
+) -> UsageConfig:
     """Determine API key configuration based on headers."""
     has_personal_openai_api_key = (
         personal_openai_api_key and personal_openai_api_key.strip() != ""
     )
-    has_consent = consent_data_collection and consent_data_collection.lower() == "true"
+    has_consent = bool(
+        consent_data_collection and consent_data_collection.lower() == "true"
+    )
 
     # Determine if using free tier
     if not has_personal_openai_api_key and not has_consent:
@@ -113,15 +90,19 @@ def get_api_key_config(
                 detail="Free tier OpenAI API key is not configured on the server.",
             )
 
-    return ApiKeyConfig(api_key_to_use=api_key_to_use, using_free_tier=using_free_tier)
+    return UsageConfig(
+        api_key_to_use=api_key_to_use,
+        using_free_tier=using_free_tier,
+        consent_data_collection=has_consent,
+    )
 
 
 def validate_audio_duration(
     audio_duration: Annotated[str, Header(alias="X-Audio-Duration")],
-    api_key_config: Annotated[ApiKeyConfig, Depends(get_api_key_config)],
+    usage_config: Annotated[UsageConfig, Depends(get_usage_config)],
 ) -> str:
     """Validate free tier audio duration does not exceed 10 minutes."""
-    if api_key_config.using_free_tier and audio_duration:
+    if usage_config.using_free_tier and audio_duration:
         try:
             duration_seconds = float(audio_duration)
             if duration_seconds > FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS:
@@ -154,7 +135,7 @@ def get_real_ip_address(request: Request) -> str:
 
 async def check_and_update_rate_limit(
     device_id: Annotated[str, Header(alias="X-Device-Id")],
-    api_key_config: Annotated[ApiKeyConfig, Depends(get_api_key_config)],
+    usage_config: Annotated[UsageConfig, Depends(get_usage_config)],
     audio_duration: Annotated[str, Depends(validate_audio_duration)],
     redis: Annotated[Redis, Depends(get_redis_client)],
     real_ip: Annotated[str, Depends(get_real_ip_address)],
@@ -165,7 +146,7 @@ async def check_and_update_rate_limit(
     If not using free tier, return device ID directly.
     If using free tier, check and update limit from Redis using device ID as key.
     """
-    if not api_key_config.using_free_tier:
+    if not usage_config.using_free_tier:
         return device_id
 
     parsed_duration = parse_audio_duration(audio_duration)

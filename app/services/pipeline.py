@@ -29,21 +29,34 @@ async def run_transcribe_pipeline(
     audio_duration: str | None,
 ):
     client = wrap_openai(llm_client)
-    run_tree = get_current_run_tree()
+
+    # If tracing is not enabled from tracing_context, run_tree will be None
+    try:
+        run_tree = get_current_run_tree()
+    except Exception:
+        run_tree = None
 
     # 0. Get audio file metadata
     audio_metadata = get_audio_metadata(audio_file)
-    run_tree_metadata: LangsmithRunTreeMetadata = {
+
+    current_metadata: LangsmithRunTreeMetadata = {
         **audio_metadata,
         "transcribe_mode": transcribe_mode.value,
         "transcribe_model_name": TRANSCRIBE_MODEL_NAME,
         "audio_duration": float(audio_duration) if audio_duration else None,
     }
 
+    def update_metadata(new_meatadata: LangsmithRunTreeMetadata):
+        current_metadata.update(new_meatadata)
+        if run_tree:
+            run_tree.add_metadata(
+                cast(dict[str, str | float | bool | None], new_meatadata)
+            )
+
     # 1. Transcribe audio to text
     response_from_transcribe = await transcribe_audio_to_text(audio_file, client)
     raw_transcript = response_from_transcribe.text
-    run_tree_metadata.update({"raw_transcript": raw_transcript})
+    update_metadata({"raw_transcript": raw_transcript})
 
     # 2. Post-process with code:
     # - Convert simplified Chinese to traditional Chinese if any
@@ -52,16 +65,10 @@ async def run_transcribe_pipeline(
     code_post_processed_transcript = add_spacing_between_chinese_english(
         code_post_processed_transcript
     )
-    run_tree_metadata.update(
-        {"code_post_processed_transcript": code_post_processed_transcript}
-    )
+    update_metadata({"code_post_processed_transcript": code_post_processed_transcript})
 
     # 3a. Transcribe mode: FAST -  return transcript with code post-processing
     if transcribe_mode == TranscribeMode.FAST:
-        if run_tree:
-            run_tree.add_metadata(
-                cast(dict[str, str | float | bool | None], run_tree_metadata)
-            )
         return code_post_processed_transcript
 
     # 3b. Transcribe mode: REFINED - Run LLM to refine the transcript
@@ -70,41 +77,29 @@ async def run_transcribe_pipeline(
             code_post_processed_transcript, client
         )
         refined_transcript = response_from_refine.output_text
-        run_tree_metadata.update(
+        update_metadata(
             {
                 "refined_transcript": refined_transcript,
                 "refine_model_name": REFINE_MODEL_NAME,
             }
         )
-        if run_tree:
-            run_tree.add_metadata(
-                cast(dict[str, str | float | bool | None], run_tree_metadata)
-            )
         return refined_transcript
 
     # 3c. Transcribe mode: STANDARD - Check punctuation health to determine if LLM post-processing is needed
     if check_transcript_punctuation_health(code_post_processed_transcript):
-        run_tree_metadata.update({"has_punctuation_fixed": False})
-        if run_tree:
-            run_tree.add_metadata(
-                cast(dict[str, str | float | bool | None], run_tree_metadata)
-            )
+        update_metadata({"has_punctuation_fixed": False})
         return code_post_processed_transcript
 
     response_with_punctuation_fix = await fix_punctuation(
         code_post_processed_transcript, client
     )
     punctuation_fixed_transcript = response_with_punctuation_fix.output_text
-    run_tree_metadata.update(
+    update_metadata(
         {
             "has_punctuation_fixed": True,
             "punctuation_fixed_transcript": punctuation_fixed_transcript,
             "punc_fix_model_name": PUNC_FIX_MODEL_NAME,
         }
     )
-    if run_tree:
-        run_tree.add_metadata(
-            cast(dict[str, str | float | bool | None], run_tree_metadata)
-        )
 
     return punctuation_fixed_transcript

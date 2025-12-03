@@ -2,6 +2,7 @@ from enum import Enum
 from dataclasses import dataclass
 from typing import TypedDict
 from pydantic import BaseModel
+from fastapi import UploadFile
 
 
 class TranscribeMode(str, Enum):
@@ -10,7 +11,7 @@ class TranscribeMode(str, Enum):
     REFINED = "refined"
 
 
-class AudioMetadataFromRequest(TypedDict):
+class AudioMetadataFromRequest(TypedDict, total=False):
     audio_file_content_type: str | None
     audio_file_size_mb: float
 
@@ -35,6 +36,27 @@ class CheckIsOpenaiApiKeyValidRequest(BaseModel):
 class CheckIsOpenaiApiKeyValidResponse(BaseModel):
     is_api_key_valid: bool
     has_unexpectied_validation_error: bool
+
+
+class UsageConfig(BaseModel):
+    api_key_to_use: str
+    using_free_tier: bool
+    consent_data_collection: bool
+
+    class Config:
+        # Exclude from OpenAPI schema since this is internal only and contains sensitive information
+        json_schema_extra = {"exclude": True}
+
+
+class ValidatedAudioFile(BaseModel):
+    file: UploadFile
+    file_size_bytes: int
+    file_size_mb: float
+
+    class Config:
+        # Exclude from OpenAPI schema since UploadFile is not serializable
+        json_schema_extra = {"exclude": True}
+        arbitrary_types_allowed = True
 
 
 @dataclass
