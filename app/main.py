@@ -1,14 +1,39 @@
 import os
-
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import transcribe, api_key, livez
 from redis.asyncio import Redis
 
-redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-redis_client = Redis.from_url(redis_url, decode_responses=True)
+from app.routers.transcribe import router as transcribe_router
+from app.routers.api_key import router as api_key_router
+from app.routers.livez import router as livez_router
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    print(f"Connecting to Redis at {redis_url}")
+
+    # Create redis instance and store it in the app state
+    # Synchrounous operation, only setting up parameters, no connection is established yet
+    app.state.redis = Redis.from_url(redis_url, decode_responses=True)
+
+    # Test connection
+    # This will trigger the actual TCP connection, if the URL is wrong, it will error here
+    try:
+        await app.state.redis.ping()
+        print("Redis connection established successfully")
+    except Exception as e:
+        print(f"Error connecting to Redis: {e}")
+
+    yield
+
+    print("Closing Redis connection...")
+    await app.state.redis.close()
+    print("Redis connection closed successfully")
+
+
+app = FastAPI(lifespan=lifespan)
 
 allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "")
 allowed_origins = [
@@ -23,6 +48,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(transcribe.router)
-app.include_router(api_key.router)
-app.include_router(livez.router)
+app.include_router(transcribe_router)
+app.include_router(api_key_router)
+app.include_router(livez_router)

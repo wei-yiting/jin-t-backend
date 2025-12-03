@@ -1,12 +1,13 @@
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Header, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends
 from openai import AsyncOpenAI, AuthenticationError, BadRequestError
 from app.services.pipeline import run_transcribe_pipeline
 from app.models import TranscribeMode
 from app.dependencies import (
     validate_file_size,
     get_api_key_config,
+    check_and_update_rate_limit,
     validate_audio_duration,
     ApiKeyConfig,
     ValidatedAudioFile,
@@ -20,7 +21,7 @@ async def convert_audio_to_text(
     validated_audio: Annotated[ValidatedAudioFile, Depends(validate_file_size)],
     api_key_config: Annotated[ApiKeyConfig, Depends(get_api_key_config)],
     transcribe_mode: Annotated[TranscribeMode, Query(alias="mode")],
-    device_id: Annotated[str, Header(alias="X-Device-Id")],
+    device_id: Annotated[str, Depends(check_and_update_rate_limit)],
     audio_duration: Annotated[str, Depends(validate_audio_duration)],
 ):
     try:

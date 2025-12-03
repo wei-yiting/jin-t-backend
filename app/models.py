@@ -1,4 +1,5 @@
 from enum import Enum
+from dataclasses import dataclass
 from typing import TypedDict
 from pydantic import BaseModel
 
@@ -34,3 +35,13 @@ class CheckIsOpenaiApiKeyValidRequest(BaseModel):
 class CheckIsOpenaiApiKeyValidResponse(BaseModel):
     is_api_key_valid: bool
     has_unexpectied_validation_error: bool
+
+
+@dataclass
+class RateLimitRule:
+    key: str
+    window_ttl: int  # rate limit window (1h or 24h)
+    max_duration: int
+    max_count: int | None = None
+    error_duration_msg: str = "分鐘的限制"
+    error_count_msg: str = "次轉錄的限制"
