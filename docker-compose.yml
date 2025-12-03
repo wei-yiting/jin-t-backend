@@ -6,3 +6,19 @@ services:
       - .env
     ports:
       - 8003:10000
+    volumes:
+      - ./app:/code/app
+    environment:
+      - REDIS_URL=redis://redis_server:6379/0
+    depends_on:
+      - redis_server
+    command: uvicorn app.main:app --host 0.0.0.0 --port 10000 --reload
+  redis_server:
+    image: redis:8.4.0-alpine
+    ports:
+      - 6379:6379
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+volumes:
+  redis_data:

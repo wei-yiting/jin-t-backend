@@ -18,3 +18,12 @@ def get_audio_metadata(audio_file: UploadFile) -> AudioMetadataFromRequest:
         "audio_file_content_type": content_type,
         "audio_file_size_mb": round(file_size_bytes / (1024 * 1024), 3),
     }
+
+
+def parse_audio_duration(audio_duration: str) -> float:
+    try:
+        return float(audio_duration)
+    except ValueError:
+        return 0.0
+    except TypeError:
+        return 0.0

@@ -20,3 +20,15 @@ TRANSCRIPT_REFINE_PROMPT_FILE_PATH = "prompts/transcript_refine_instruction.txt"
 FULL_WIDTH_PUNCS = {"。", "，", "？", "！", "、", "；", "："}
 HALF_WIDTH_PUNCS = {".", ",", "?", "!", ";", ":"}
 FINAL_PUNCS = {"。", "？", "！", ".", "?", "!", "..."}
+
+# Validation limits
+MAX_AUDIO_FILE_SIZE_MB = 25
+
+# Free tier limits
+FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS = 10 * 60  # 10 minutes
+FREE_TIER_1H_MAX_TOTAL_AUDIO_DURATION_SECONDS = 10 * 60  # 10 minutes
+FREE_TIER_24H_MAX_TOTAL_AUDIO_DURATION_SECONDS = 30 * 60  # 30 minutes
+FREE_TIER_SINGLE_DEVICE_1H_MAX_TRANSCRIBE_COUNT = 5
+FREE_TIER_SINGLE_IP_1H_MAX_TRANSCRIBE_COUNT = (
+    20  # higher than device limit in case multiple users use the same IP
+)

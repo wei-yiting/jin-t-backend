@@ -1,17 +1,39 @@
 import os
-from typing import Annotated
-
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from openai import AsyncOpenAI, AuthenticationError, BadRequestError
-from app.services.pipeline import run_transcription_pipeline
-from app.models import (
-    TranscribeMode,
-    CheckIsOpenaiApiKeyValidResponse,
-    CheckIsOpenaiApiKeyValidRequest,
-)
+from redis.asyncio import Redis
 
-app = FastAPI()
+from app.routers.transcribe import router as transcribe_router
+from app.routers.api_key import router as api_key_router
+from app.routers.livez import router as livez_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    print(f"Connecting to Redis at {redis_url}")
+
+    # Create redis instance and store it in the app state
+    # Synchrounous operation, only setting up parameters, no connection is established yet
+    app.state.redis = Redis.from_url(redis_url, decode_responses=True)
+
+    # Test connection
+    # This will trigger the actual TCP connection, if the URL is wrong, it will error here
+    try:
+        await app.state.redis.ping()
+        print("Redis connection established successfully")
+    except Exception as e:
+        print(f"Error connecting to Redis: {e}")
+
+    yield
+
+    print("Closing Redis connection...")
+    await app.state.redis.close()
+    print("Redis connection closed successfully")
+
+
+app = FastAPI(lifespan=lifespan)
 
 allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "")
 allowed_origins = [
@@ -26,93 +48,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-@app.get("/")
-async def root():
-    return {"message": "This is the root endpoint of Jin-T Backend"}
-
-
-@app.post("/transcribe")
-async def convert_audio_to_text(
-    audio_file: Annotated[UploadFile, File()],
-    openai_api_key: Annotated[str, Form()],
-    transcribe_mode: Annotated[TranscribeMode, Form()],
-    audio_duration: Annotated[str | None, Form()] = None,
-):
-    # Validate audio file
-    if not audio_file.filename:
-        raise HTTPException(status_code=400, detail="No audio file provided")
-
-    # Check file size (must be > 100 bytes for valid audio)
-    file_content = await audio_file.read()
-    file_size = len(file_content)
-
-    if file_size < 100:
-        raise HTTPException(
-            status_code=400, detail="Audio file is too small or corrupted"
-        )
-
-    # Reset file pointer for processing
-    await audio_file.seek(0)
-
-    try:
-        client = AsyncOpenAI(api_key=openai_api_key)
-        result = await run_transcription_pipeline(
-            audio_file=audio_file,
-            llm_client=client,
-            transcribe_mode=transcribe_mode,
-            audio_duration=audio_duration,
-        )
-        return {"transcript": result}
-    except BadRequestError as e:
-        # OpenAI API returned 400 (corrupted/unsupported audio file)
-        error_message = str(e)
-        if (
-            "corrupted" in error_message.lower()
-            or "unsupported" in error_message.lower()
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="Audio file is corrupted or in an unsupported format",
-            )
-        raise HTTPException(status_code=400, detail=error_message)
-    except AuthenticationError:
-        raise HTTPException(status_code=401, detail="Invalid OpenAI API key")
-    except Exception as e:
-        # Log the error for debugging
-        print(f"Unexpected error in transcription: {e}")
-        raise HTTPException(
-            status_code=500, detail="An unexpected error occurred during transcription"
-        )
-
-
-@app.post("/check-openai-api-key")
-async def check_openai_api_key(
-    request: CheckIsOpenaiApiKeyValidRequest,
-) -> CheckIsOpenaiApiKeyValidResponse:
-    """Checks if an OpenAI API key is valid by attempting to list models."""
-    client = AsyncOpenAI(api_key=request.openai_api_key)
-    try:
-        await client.models.list()
-        return CheckIsOpenaiApiKeyValidResponse(
-            is_api_key_valid=True,
-            has_unexpectied_validation_error=False,
-        )
-    except AuthenticationError:
-        # AuthenticationError is raised when the API key is invalid
-        return CheckIsOpenaiApiKeyValidResponse(
-            is_api_key_valid=False,
-            has_unexpectied_validation_error=False,
-        )
-    except Exception as e:
-        # Handle other potential errors, e.g., network issues
-        print(f"An unexpected error occurred when checking OpenAI API key: {e}")
-        return CheckIsOpenaiApiKeyValidResponse(
-            is_api_key_valid=False,
-            has_unexpectied_validation_error=True,
-        )
-
-
-@app.api_route("/livez", methods=["GET", "HEAD"])
-async def check_livez():
-    return {"status": "live"}
+app.include_router(transcribe_router)
+app.include_router(api_key_router)
+app.include_router(livez_router)
