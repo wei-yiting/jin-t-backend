@@ -11,12 +11,20 @@ class TranscribeMode(str, Enum):
     REFINED = "refined"
 
 
+class TranscribeRequestMetadata(TypedDict, total=False):
+    device_id: str
+    request_id: str
+    using_personal_api_key: bool
+
+
 class AudioMetadataFromRequest(TypedDict, total=False):
     audio_file_content_type: str | None
     audio_file_size_mb: float
 
 
-class LangsmithRunTreeMetadata(AudioMetadataFromRequest, total=False):
+class LangsmithRunTreeMetadata(
+    AudioMetadataFromRequest, TranscribeRequestMetadata, total=False
+):
     transcribe_mode: str
     transcribe_model_name: str
     raw_transcript: str
@@ -27,6 +35,7 @@ class LangsmithRunTreeMetadata(AudioMetadataFromRequest, total=False):
     punc_fix_model_name: str | None
     refined_transcript: str | None
     refine_model_name: str | None
+    r2_object_key: str
 
 
 class CheckIsOpenaiApiKeyValidRequest(BaseModel):

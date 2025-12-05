@@ -7,7 +7,11 @@ from fastapi import UploadFile
 from openai import AsyncOpenAI
 
 from app.config import PUNC_FIX_MODEL_NAME, REFINE_MODEL_NAME, TRANSCRIBE_MODEL_NAME
-from app.models import LangsmithRunTreeMetadata, TranscribeMode
+from app.models import (
+    LangsmithRunTreeMetadata,
+    TranscribeMode,
+    TranscribeRequestMetadata,
+)
 from app.lib.audio_tools import get_audio_metadata
 from app.lib.transcript_processor import (
     check_transcript_punctuation_health,
@@ -27,6 +31,8 @@ async def run_transcribe_pipeline(
     llm_client: AsyncOpenAI,
     transcribe_mode: TranscribeMode,
     audio_duration: str | None,
+    r2_object_key: str | None,
+    transcribe_request_metadata: TranscribeRequestMetadata,
 ):
     client = wrap_openai(llm_client)
 
@@ -36,27 +42,33 @@ async def run_transcribe_pipeline(
     except Exception:
         run_tree = None
 
-    # 0. Get audio file metadata
-    audio_metadata = get_audio_metadata(audio_file)
-
-    current_metadata: LangsmithRunTreeMetadata = {
-        **audio_metadata,
-        "transcribe_mode": transcribe_mode.value,
-        "transcribe_model_name": TRANSCRIBE_MODEL_NAME,
-        "audio_duration": float(audio_duration) if audio_duration else None,
-    }
-
-    def update_metadata(new_meatadata: LangsmithRunTreeMetadata):
-        current_metadata.update(new_meatadata)
+    def add_langsmith_metadata_if_trancing_enabled(
+        new_meatadata: LangsmithRunTreeMetadata,
+    ):
         if run_tree:
             run_tree.add_metadata(
                 cast(dict[str, str | float | bool | None], new_meatadata)
             )
 
+    # 0. Add already known metadata to the run tree
+    audio_metadata = get_audio_metadata(audio_file)
+    known_metadata: LangsmithRunTreeMetadata = {
+        **audio_metadata,
+        **transcribe_request_metadata,
+        "transcribe_mode": transcribe_mode.value,
+        "transcribe_model_name": TRANSCRIBE_MODEL_NAME,
+        "audio_duration": float(audio_duration) if audio_duration else None,
+    }
+
+    if r2_object_key:
+        known_metadata.update({"r2_object_key": r2_object_key})
+
+    add_langsmith_metadata_if_trancing_enabled(known_metadata)
+
     # 1. Transcribe audio to text
     response_from_transcribe = await transcribe_audio_to_text(audio_file, client)
     raw_transcript = response_from_transcribe.text
-    update_metadata({"raw_transcript": raw_transcript})
+    add_langsmith_metadata_if_trancing_enabled({"raw_transcript": raw_transcript})
 
     # 2. Post-process with code:
     # - Convert simplified Chinese to traditional Chinese if any
@@ -65,7 +77,9 @@ async def run_transcribe_pipeline(
     code_post_processed_transcript = add_spacing_between_chinese_english(
         code_post_processed_transcript
     )
-    update_metadata({"code_post_processed_transcript": code_post_processed_transcript})
+    add_langsmith_metadata_if_trancing_enabled(
+        {"code_post_processed_transcript": code_post_processed_transcript}
+    )
 
     # 3a. Transcribe mode: FAST -  return transcript with code post-processing
     if transcribe_mode == TranscribeMode.FAST:
@@ -77,7 +91,7 @@ async def run_transcribe_pipeline(
             code_post_processed_transcript, client
         )
         refined_transcript = response_from_refine.output_text
-        update_metadata(
+        add_langsmith_metadata_if_trancing_enabled(
             {
                 "refined_transcript": refined_transcript,
                 "refine_model_name": REFINE_MODEL_NAME,
@@ -87,14 +101,14 @@ async def run_transcribe_pipeline(
 
     # 3c. Transcribe mode: STANDARD - Check punctuation health to determine if LLM post-processing is needed
     if check_transcript_punctuation_health(code_post_processed_transcript):
-        update_metadata({"has_punctuation_fixed": False})
+        add_langsmith_metadata_if_trancing_enabled({"has_punctuation_fixed": False})
         return code_post_processed_transcript
 
     response_with_punctuation_fix = await fix_punctuation(
         code_post_processed_transcript, client
     )
     punctuation_fixed_transcript = response_with_punctuation_fix.output_text
-    update_metadata(
+    add_langsmith_metadata_if_trancing_enabled(
         {
             "has_punctuation_fixed": True,
             "punctuation_fixed_transcript": punctuation_fixed_transcript,
