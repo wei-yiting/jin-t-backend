@@ -32,3 +32,6 @@ FREE_TIER_SINGLE_DEVICE_1H_MAX_TRANSCRIBE_COUNT = 5
 FREE_TIER_SINGLE_IP_1H_MAX_TRANSCRIBE_COUNT = (
     20  # higher than device limit in case multiple users use the same IP
 )
+
+# Task progress
+TRANSCRIBE_TASK_PROGRESS_TTL = 30 * 60  # 30 minutes
