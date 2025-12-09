@@ -7,12 +7,12 @@ from app.models import (
 )
 from app.services.transcribe_pipeline import run_transcribe_pipeline
 from app.services.task_progress import TaskProgressService
+from app.lib.uploadfile_memory import UploadFileInMemory
 
 
 async def transcribe_worker(
     task_id: str,
-    file_content: bytes,
-    filename: str,
+    audio_file: UploadFileInMemory,
     openai_api_key: str,
     transcribe_mode: TranscribeMode,
     audio_duration: str | None,
@@ -42,8 +42,7 @@ async def transcribe_worker(
 
         # Call core pipeline
         result = await run_transcribe_pipeline(
-            file_content=file_content,  # use bytes type instead of UploadFile type from FastAPI for thread safety
-            filename=filename,
+            audio_file=audio_file,
             llm_client=llm_client,
             transcribe_mode=transcribe_mode,
             audio_duration=audio_duration,

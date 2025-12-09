@@ -1,5 +1,6 @@
 import json
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from app.config import TRANSCRIBE_TASK_PROGRESS_TTL
 from app.models import TaskStatus, TaskProcessingProgressCode
 
@@ -16,7 +17,7 @@ class TaskProgressService:
     async def init_task(self, task_id: str):
         initial_state = {
             "status": TaskStatus.QUEUED.value,
-            "message": "檔案已接收，排隊處理中...",
+            "message": "音檔上傳中...",
         }
         await self.redis_client.set(
             self._get_key(task_id), json.dumps(initial_state), ex=self.ttl
@@ -55,7 +56,18 @@ class TaskProgressService:
         )
 
     async def get_task_progress(self, task_id: str) -> dict[str, str] | None:
-        task_data = await self.redis_client.get(self._get_key(task_id))
-        if not task_data:
+        try:
+            task_data = await self.redis_client.get(self._get_key(task_id))
+            if not task_data:
+                return None
+            return json.loads(task_data)
+        except json.JSONDecodeError:
+            print(f"Error: Redis data for {task_id} is not valid JSON.")
+            return {"status": "failed", "message": "Internal Data Error"}
+        except RedisError as e:
+            print(f"Error getting task progress: {e}")
             return None
-        return json.loads(task_data)
+
+        except Exception as e:
+            print(f"Error getting task progress: {e}")
+            return None

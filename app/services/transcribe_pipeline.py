@@ -2,7 +2,6 @@ from typing import cast, Callable, Awaitable
 from langsmith import traceable
 from langsmith.wrappers import wrap_openai
 from langsmith.run_helpers import get_current_run_tree
-from fastapi import UploadFile
 
 from openai import AsyncOpenAI
 
@@ -37,7 +36,7 @@ async def no_op_status_callback(
 
 @traceable(run_type="chain", name="JinT_Main_Pipeline")
 async def run_transcribe_pipeline(
-    audio_file: UploadFile,
+    audio_file: bytes,
     llm_client: AsyncOpenAI,
     transcribe_mode: TranscribeMode,
     audio_duration: str | None,

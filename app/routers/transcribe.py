@@ -24,14 +24,15 @@ from app.dependencies import (
     validate_audio_duration,
     get_redis_client,
 )
+from app.lib.uploadfile_memory import UploadFileInMemory
 
 router = APIRouter(
-    prefix="/transcribe",
+    prefix="/transcribe-tasks",
     tags=["transcribe"],
 )
 
 
-@router.post("/start-task")
+@router.post("/")
 async def start_transcribe_task(
     validated_audio: Annotated[ValidatedAudioFile, Depends(validate_file_size)],
     usage_config: Annotated[UsageConfig, Depends(get_usage_config)],
@@ -46,7 +47,13 @@ async def start_transcribe_task(
     try:
         # 1. Read audio file to bytes to avoid the UploadFile being deleted after the request is completed
         #    so file content can be used in the background task even after this POST request is completed
+
         audio_bytes = await validated_audio.file.read()
+        audio_file_in_memory = UploadFileInMemory(
+            file_content=audio_bytes,
+            filename=validated_audio.file.filename or "",
+            content_type=validated_audio.file.content_type or "",
+        )
         original_audio_filename = validated_audio.file.filename
 
         # 2. If consent data collection is enabled, upload the audio file to R2
@@ -77,12 +84,13 @@ async def start_transcribe_task(
             background_tasks.add_task(
                 transcribe_worker,
                 task_id=request_id,
-                file_content=audio_bytes,
-                filename=original_audio_filename or "",
+                audio_file=audio_file_in_memory,
                 openai_api_key=usage_config.api_key_to_use,
                 transcribe_mode=transcribe_mode,
                 audio_duration=audio_duration,
-                r2_object_key=r2_object_key or None,
+                r2_object_key=r2_object_key
+                if usage_config.consent_data_collection
+                else None,
                 transcribe_request_metadata=TranscribeRequestMetadata(
                     device_id=device_id,
                     request_id=request_id,
@@ -103,7 +111,7 @@ async def start_transcribe_task(
         )
 
 
-@router.get("/get-task-progress")
+@router.get("/{task_id}")
 async def get_task_progress(
     task_id: str,
     redis_client: Annotated[Redis, Depends(get_redis_client)],
@@ -119,11 +127,15 @@ async def get_task_progress(
             )
 
         return TaskProgressResponse(
-            status=TaskStatus(task_progress["status"]),
-            progress_code=TaskProcessingProgressCode(task_progress["progress_code"]),
-            message=task_progress["message"],
-            transcript=task_progress["transcript"],
-            error_detail=task_progress["error_detail"],
+            status=TaskStatus(task_progress.get("status", TaskStatus.FAILED.value)),
+            progress_code=TaskProcessingProgressCode(
+                task_progress.get("progress_code", None)
+            )
+            if task_progress.get("progress_code", None) is not None
+            else None,
+            message=task_progress.get("message", ""),
+            transcript=task_progress.get("transcript", None),
+            error_detail=task_progress.get("error_detail", None),
         )
 
     except Exception as e:

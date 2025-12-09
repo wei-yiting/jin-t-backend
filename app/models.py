@@ -26,10 +26,10 @@ class TaskProcessingProgressCode(str, Enum):
 
 class TaskProgressResponse(BaseModel):
     status: TaskStatus
-    progress_code: TaskProcessingProgressCode | None
+    progress_code: TaskProcessingProgressCode | None = None
     message: str
-    transcript: str | None
-    error_detail: str | None
+    transcript: str | None = None
+    error_detail: str | None = None
 
 
 class TranscribeRequestMetadata(TypedDict, total=False):
