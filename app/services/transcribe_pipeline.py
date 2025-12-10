@@ -23,6 +23,7 @@ from app.services.llm_client import (
     fix_punctuation,
     refine_transcript,
 )
+from app.lib.uploadfile_memory import UploadFileInMemory
 
 StatusCallback = Callable[[TaskProcessingProgressCode, str], Awaitable[None]]
 
@@ -36,7 +37,7 @@ async def no_op_status_callback(
 
 @traceable(run_type="chain", name="JinT_Main_Pipeline")
 async def run_transcribe_pipeline(
-    audio_file: bytes,
+    audio_file: UploadFileInMemory,
     llm_client: AsyncOpenAI,
     transcribe_mode: TranscribeMode,
     audio_duration: str | None,
