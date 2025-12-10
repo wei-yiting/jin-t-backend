@@ -11,6 +11,27 @@ class TranscribeMode(str, Enum):
     REFINED = "refined"
 
 
+class TaskStatus(str, Enum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class TaskProcessingProgressCode(str, Enum):
+    TRANSCRIBING = "transcribing"
+    PUNC_FIXING = "punc_fixing"
+    REFINING = "refining"
+
+
+class TaskProgressResponse(BaseModel):
+    status: TaskStatus
+    progress_code: TaskProcessingProgressCode | None = None
+    message: str
+    transcript: str | None = None
+    error_detail: str | None = None
+
+
 class TranscribeRequestMetadata(TypedDict, total=False):
     device_id: str
     request_id: str

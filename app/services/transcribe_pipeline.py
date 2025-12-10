@@ -1,8 +1,7 @@
-from typing import cast
+from typing import cast, Callable, Awaitable
 from langsmith import traceable
 from langsmith.wrappers import wrap_openai
 from langsmith.run_helpers import get_current_run_tree
-from fastapi import UploadFile
 
 from openai import AsyncOpenAI
 
@@ -11,6 +10,7 @@ from app.models import (
     LangsmithRunTreeMetadata,
     TranscribeMode,
     TranscribeRequestMetadata,
+    TaskProcessingProgressCode,
 )
 from app.lib.audio_tools import get_audio_metadata
 from app.lib.transcript_processor import (
@@ -23,16 +23,27 @@ from app.services.llm_client import (
     fix_punctuation,
     refine_transcript,
 )
+from app.lib.uploadfile_memory import UploadFileInMemory
+
+StatusCallback = Callable[[TaskProcessingProgressCode, str], Awaitable[None]]
+
+
+async def no_op_status_callback(
+    progress_code: TaskProcessingProgressCode, message: str
+):
+    """No-op status callback that does nothing."""
+    pass
 
 
 @traceable(run_type="chain", name="JinT_Main_Pipeline")
 async def run_transcribe_pipeline(
-    audio_file: UploadFile,
+    audio_file: UploadFileInMemory,
     llm_client: AsyncOpenAI,
     transcribe_mode: TranscribeMode,
     audio_duration: str | None,
     r2_object_key: str | None,
     transcribe_request_metadata: TranscribeRequestMetadata,
+    status_callback: StatusCallback = no_op_status_callback,
 ):
     client = wrap_openai(llm_client)
 
@@ -66,6 +77,9 @@ async def run_transcribe_pipeline(
     add_langsmith_metadata_if_trancing_enabled(known_metadata)
 
     # 1. Transcribe audio to text
+    await status_callback(
+        TaskProcessingProgressCode.TRANSCRIBING, "正在將語音轉換為文字..."
+    )
     response_from_transcribe = await transcribe_audio_to_text(audio_file, client)
     raw_transcript = response_from_transcribe.text
     add_langsmith_metadata_if_trancing_enabled({"raw_transcript": raw_transcript})
@@ -87,6 +101,7 @@ async def run_transcribe_pipeline(
 
     # 3b. Transcribe mode: REFINED - Run LLM to refine the transcript
     if transcribe_mode == TranscribeMode.REFINED:
+        await status_callback(TaskProcessingProgressCode.REFINING, "正在潤飾文字...")
         response_from_refine = await refine_transcript(
             code_post_processed_transcript, client
         )
@@ -104,6 +119,9 @@ async def run_transcribe_pipeline(
         add_langsmith_metadata_if_trancing_enabled({"has_punctuation_fixed": False})
         return code_post_processed_transcript
 
+    await status_callback(
+        TaskProcessingProgressCode.PUNC_FIXING, "偵測到標點符號問題，正在修正..."
+    )
     response_with_punctuation_fix = await fix_punctuation(
         code_post_processed_transcript, client
     )
