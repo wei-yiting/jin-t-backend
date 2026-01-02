@@ -1,7 +1,7 @@
 from enum import Enum
 from dataclasses import dataclass
 from typing import TypedDict
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import UploadFile
 
 
@@ -60,7 +60,7 @@ class LangsmithRunTreeMetadata(
 
 
 class CheckIsOpenaiApiKeyValidRequest(BaseModel):
-    openai_api_key: str
+    encrypted_openai_api_key: str = Field(description="base64 encoded encrypted OpenAI API key")
 
 
 class CheckIsOpenaiApiKeyValidResponse(BaseModel):

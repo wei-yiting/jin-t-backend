@@ -1,19 +1,19 @@
-from fastapi import APIRouter
+from typing import Annotated
+from fastapi import APIRouter, Depends
 from openai import AsyncOpenAI, AuthenticationError
-from app.models import (
-    CheckIsOpenaiApiKeyValidResponse,
-    CheckIsOpenaiApiKeyValidRequest,
-)
+
+from app.models import CheckIsOpenaiApiKeyValidResponse
+from app.dependencies import get_openai_api_key_from_request_body
 
 router = APIRouter()
 
 
 @router.post("/validate-openai-api-key")
 async def validate_openai_api_key(
-    request: CheckIsOpenaiApiKeyValidRequest,
+    decrypted_openai_api_key: Annotated[str, Depends(get_openai_api_key_from_request_body)],
 ) -> CheckIsOpenaiApiKeyValidResponse:
     """Checks if an OpenAI API key is valid by attempting to list models."""
-    client = AsyncOpenAI(api_key=request.openai_api_key)
+    client = AsyncOpenAI(api_key=decrypted_openai_api_key)
     try:
         await client.models.list()
         return CheckIsOpenaiApiKeyValidResponse(
