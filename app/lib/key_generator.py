@@ -14,10 +14,10 @@ pem_private = private_key.private_bytes(
     encryption_algorithm=serialization.NoEncryption()
 )
 
-# 3. Convert to PEM format (Public)
+# 3. Convert to PEM format (Public) - Use PKCS1 for JSEncrypt compatibility
 pem_public = private_key.public_key().public_bytes(
     encoding=serialization.Encoding.PEM,
-    format=serialization.PublicFormat.SubjectPublicKeyInfo
+    format=serialization.PublicFormat.PKCS1
 )
 
 # 4. Print out for pasting or saving directly
