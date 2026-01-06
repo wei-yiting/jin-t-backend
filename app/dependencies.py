@@ -2,6 +2,11 @@
 
 import os
 from typing import Annotated
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import padding
+import base64
 
 from fastapi import Header, HTTPException, Request, UploadFile, Depends, File
 from redis.asyncio import Redis
@@ -13,8 +18,7 @@ from app.config import (
 from app.lib.retry_time_generator import get_formatted_retry_time_in_taipei_timezone
 from app.lib.audio_tools import parse_audio_duration
 from app.lib.rate_limit_rules import get_rate_limit_rules
-from app.models import ValidatedAudioFile, UsageConfig
-
+from app.models import ValidatedAudioFile, UsageConfig, CheckIsOpenaiApiKeyValidRequest
 
 async def validate_audio_file(
     audio_file: Annotated[UploadFile, File()],
@@ -57,12 +61,12 @@ async def validate_file_size(
 
 
 def get_usage_config(
-    personal_openai_api_key: Annotated[str, Header(alias="X-Custom-Openai-Api-Key")],
+    encrypted_openai_api_key: Annotated[str, Header(alias="X-Custom-Openai-Api-Key")],
     consent_data_collection: Annotated[str, Header(alias="X-Consent-Data-Collection")],
 ) -> UsageConfig:
     """Determine API key configuration based on headers."""
     has_personal_openai_api_key = (
-        personal_openai_api_key and personal_openai_api_key.strip() != ""
+        encrypted_openai_api_key and encrypted_openai_api_key.strip() != ""
     )
     has_consent = bool(
         consent_data_collection and consent_data_collection.lower() == "true"
@@ -79,7 +83,7 @@ def get_usage_config(
     if has_personal_openai_api_key:
         # Scenario 2: Custom API key provided
         using_free_tier = False
-        api_key_to_use = personal_openai_api_key
+        api_key_to_use = core_decode_and_decrypt_openai_api_key(encrypted_openai_api_key)
     else:
         # Scenario 3: No API key AND consent given (free tier)
         using_free_tier = True
@@ -209,3 +213,63 @@ async def check_and_update_rate_limit(
         await pipe.execute()
 
     return device_id
+
+
+_private_key_str = os.getenv("API_KEY_ENCRYPTION_PRIVATE_KEY", "")
+
+def core_decode_and_decrypt_openai_api_key(encrypted_openai_api_key: str) -> str:
+    try:
+        # 1. Prepare the private key
+        if not _private_key_str:
+            raise HTTPException(
+                status_code=500,
+                detail="Private key is not configured on the server.",
+            )
+            
+        formatted_key_str = _private_key_str.replace('\\n', '\n')
+        private_key_bytes = formatted_key_str.encode('utf-8')
+        private_key = serialization.load_pem_private_key(
+            private_key_bytes,
+            password=None,
+            backend=default_backend()
+        )
+        
+        if not isinstance(private_key, rsa.RSAPrivateKey):
+            raise HTTPException(
+                status_code=500,
+                detail="Loaded private key is not RSA format, cannot decrypt.",
+            )
+        
+        # 2. Base64 Decode
+        encrypted_bytes = base64.b64decode(encrypted_openai_api_key)
+        
+        # 3. RSA Decrypt
+        decrypted_bytes = private_key.decrypt(
+            encrypted_bytes,
+            padding.PKCS1v15()
+        )
+        
+        decrypted_openai_api_key = decrypted_bytes.decode('utf-8')
+        return decrypted_openai_api_key
+    
+    except HTTPException:
+        raise
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid encryption format (Base64 error)"
+        )
+    except Exception:
+        # Decryption failed (Key is wrong) or other errors
+        raise HTTPException(
+            status_code=401, 
+            detail="Decryption failed. Invalid security credentials."
+        )
+
+
+def get_openai_api_key_from_request_body(
+    request_body: CheckIsOpenaiApiKeyValidRequest
+) -> str:
+    """Get the OpenAI API key from the request body."""
+    return core_decode_and_decrypt_openai_api_key(request_body.encrypted_openai_api_key)
