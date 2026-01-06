@@ -251,6 +251,9 @@ def core_decode_and_decrypt_openai_api_key(encrypted_openai_api_key: str) -> str
         
         decrypted_openai_api_key = decrypted_bytes.decode('utf-8')
         return decrypted_openai_api_key
+    
+    except HTTPException:
+        raise
 
     except ValueError:
         raise HTTPException(
