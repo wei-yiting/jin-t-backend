@@ -11,7 +11,7 @@ os.environ["FREE_TIER_OPENAI_API_KEY"] = "test-free-tier-openai-api-key"
 os.environ["ALLOWED_ORIGINS"] = "http://localhost:3000"
 
 from app.main import app
-from app.config import MAX_FILE_SIZE_MB, FREE_TIER_MAX_AUDIO_DURATION_SECONDS
+from app.config import MAX_AUDIO_FILE_SIZE_MB, FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS
 
 
 @pytest.fixture
@@ -32,7 +32,7 @@ def small_audio_file():
 def large_audio_file():
     """Create a large audio file exceeding 25MB limit."""
     # Create a file > 25MB
-    file_size = int((MAX_FILE_SIZE_MB + 1) * 1024 * 1024)
+    file_size = int((MAX_AUDIO_FILE_SIZE_MB + 1) * 1024 * 1024)
     audio_data = b"x" * file_size
     return ("large_audio.mp3", BytesIO(audio_data), "audio/mpeg")
 
@@ -54,7 +54,7 @@ def exactly_100_bytes_file():
 @pytest.fixture
 def exactly_25mb_file():
     """Create an audio file exactly 25MB."""
-    file_size = int(MAX_FILE_SIZE_MB * 1024 * 1024)
+    file_size = int(MAX_AUDIO_FILE_SIZE_MB * 1024 * 1024)
     audio_data = b"x" * file_size
     return ("exact_25mb.mp3", BytesIO(audio_data), "audio/mpeg")
 
@@ -155,7 +155,7 @@ class TestFileSizeValidation:
 
         assert response.status_code == 413
         assert (
-            f"File size exceeds the maximum limit of {MAX_FILE_SIZE_MB}MB"
+            f"File size exceeds the maximum limit of {MAX_AUDIO_FILE_SIZE_MB}MB"
             in response.json()["detail"]
         )
 
@@ -176,7 +176,7 @@ class TestFileSizeValidation:
 
         assert response.status_code == 413
         assert (
-            f"File size exceeds the maximum limit of {MAX_FILE_SIZE_MB}MB"
+            f"File size exceeds the maximum limit of {MAX_AUDIO_FILE_SIZE_MB}MB"
             in response.json()["detail"]
         )
 
@@ -278,7 +278,7 @@ class TestAudioDurationValidation:
         self, client, small_audio_file, mock_transcription
     ):
         """Test that audio > 10 minutes is rejected for free tier."""
-        duration_over_limit = FREE_TIER_MAX_AUDIO_DURATION_SECONDS + 1
+        duration_over_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS + 1
 
         response = client.post(
             "/transcribe?mode=standard",
@@ -299,7 +299,7 @@ class TestAudioDurationValidation:
         self, client, small_audio_file, mock_transcription
     ):
         """Test that audio exactly 10 minutes passes for free tier."""
-        duration_at_limit = FREE_TIER_MAX_AUDIO_DURATION_SECONDS
+        duration_at_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS
 
         response = client.post(
             "/transcribe?mode=standard",
@@ -319,7 +319,7 @@ class TestAudioDurationValidation:
         self, client, small_audio_file, mock_transcription
     ):
         """Test that audio < 10 minutes passes for free tier."""
-        duration_below_limit = FREE_TIER_MAX_AUDIO_DURATION_SECONDS - 100
+        duration_below_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS - 100
 
         response = client.post(
             "/transcribe?mode=standard",
@@ -339,7 +339,7 @@ class TestAudioDurationValidation:
         self, client, small_audio_file, mock_transcription
     ):
         """Test that audio > 10 minutes is allowed with custom API key."""
-        duration_over_limit = FREE_TIER_MAX_AUDIO_DURATION_SECONDS + 100
+        duration_over_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS + 100
 
         response = client.post(
             "/transcribe?mode=standard",

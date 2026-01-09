@@ -1,5 +1,4 @@
 from enum import Enum
-from dataclasses import dataclass
 from typing import TypedDict
 from pydantic import BaseModel, Field
 from fastapi import UploadFile
@@ -89,11 +88,10 @@ class ValidatedAudioFile(BaseModel):
         arbitrary_types_allowed = True
 
 
-@dataclass
-class RateLimitRule:
-    key: str
-    window_ttl: int  # rate limit window (1h or 24h)
-    max_duration: int
-    max_count: int | None = None
-    error_duration_msg: str = "分鐘的限制"
-    error_count_msg: str = "次轉錄的限制"
+class RateLimitRule(BaseModel):
+    key: str = Field(description="Redis key for rate limit")
+    window_ttl: int = Field(description="Rate limit interval window ttl in seconds (1h or 24h)")
+    max_duration: int | None = Field(description="Maximum duration in seconds", default=None)
+    max_count: int | None = Field(description="Maximum count", default=None)
+    error_duration_msg: str = Field(description="Error message when duration exceeds limit", default="分鐘的限制")
+    error_count_msg: str = Field(description="Error message when count exceeds limit", default="次轉錄的限制")

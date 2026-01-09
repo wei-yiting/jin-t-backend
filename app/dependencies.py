@@ -105,7 +105,7 @@ def validate_audio_duration(
     audio_duration: Annotated[str, Header(alias="X-Audio-Duration")],
     usage_config: Annotated[UsageConfig, Depends(get_usage_config)],
 ) -> str:
-    """Validate free tier audio duration does not exceed 10 minutes."""
+    """Validate free tier single audio duration does not exceed configured limit."""
     if usage_config.using_free_tier and audio_duration:
         try:
             duration_seconds = float(audio_duration)
@@ -187,7 +187,7 @@ async def check_and_update_rate_limit(
             )
 
         # B. 檢查時長
-        if current_duration + parsed_duration > rule.max_duration:
+        if rule.max_duration is not None and current_duration + parsed_duration > rule.max_duration:
             limit_min = rule.max_duration // 60
             duration_limit_rule_str = rule.error_duration_msg.format(limit=limit_min)
             raise HTTPException(
