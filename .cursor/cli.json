@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [],
+    "deny": [
+      "Shell(git push*)",
+      "Shell(gh pr create*)",
+      "Shell(gh pr merge*)",
+      "Shell(gh pr close*)",
+      "Shell(gh pr review --approve*)",
+      "Shell(gh pr review --request-changes*)",
+      "Shell(gh pr review -a*)",
+      "Shell(gh pr review -r*)",
+      "Write(**)"
+    ]
+  }
+}
