@@ -204,7 +204,8 @@ async def check_and_update_rate_limit(
             if rule.max_count is not None:
                 pipe.hincrby(rule.key, "transcribe_count", 1)
 
-            pipe.hincrbyfloat(rule.key, "total_duration", parsed_duration)
+            if rule.max_duration is not None:
+                pipe.hincrbyfloat(rule.key, "total_duration", parsed_duration)
 
             is_new_key = not data
             if is_new_key:

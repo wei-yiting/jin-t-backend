@@ -298,7 +298,7 @@ class TestAudioDurationValidation:
     def test_free_tier_audio_duration_exactly_at_limit_passes(
         self, client, small_audio_file, mock_transcription
     ):
-        """Test that audio exactly 10 minutes passes for free tier."""
+        """Test that audio exactly 30 minutes passes for free tier."""
         duration_at_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS
 
         response = client.post(
@@ -318,7 +318,7 @@ class TestAudioDurationValidation:
     def test_free_tier_audio_duration_below_limit_passes(
         self, client, small_audio_file, mock_transcription
     ):
-        """Test that audio < 10 minutes passes for free tier."""
+        """Test that audio < 30 minutes passes for free tier."""
         duration_below_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS - 100
 
         response = client.post(
@@ -338,7 +338,7 @@ class TestAudioDurationValidation:
     def test_custom_api_key_no_duration_limit(
         self, client, small_audio_file, mock_transcription
     ):
-        """Test that audio > 10 minutes is allowed with custom API key."""
+        """Test that audio > 30 minutes is allowed with custom API key."""
         duration_over_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS + 100
 
         response = client.post(
