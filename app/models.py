@@ -1,9 +1,9 @@
 from enum import Enum
-from dataclasses import dataclass
 from typing import TypedDict
+from dataclasses import dataclass
+
 from pydantic import BaseModel, Field
 from fastapi import UploadFile
-
 
 class TranscribeMode(str, Enum):
     FAST = "fast"
@@ -88,12 +88,11 @@ class ValidatedAudioFile(BaseModel):
         json_schema_extra = {"exclude": True}
         arbitrary_types_allowed = True
 
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class RateLimitRule:
     key: str
-    window_ttl: int  # rate limit window (1h or 24h)
-    max_duration: int
+    window_ttl: int
+    max_duration: int | None = None 
     max_count: int | None = None
     error_duration_msg: str = "分鐘的限制"
     error_count_msg: str = "次轉錄的限制"
