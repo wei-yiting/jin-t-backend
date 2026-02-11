@@ -46,6 +46,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "HEAD", "POST"],
     allow_headers=["*"],
+    max_age=86400,
 )
 
 app.include_router(transcribe_router)

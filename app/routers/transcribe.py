@@ -32,7 +32,7 @@ router = APIRouter(
 )
 
 
-@router.post("/")
+@router.post("")
 async def start_transcribe_task(
     validated_audio: Annotated[ValidatedAudioFile, Depends(validate_file_size)],
     usage_config: Annotated[UsageConfig, Depends(get_usage_config)],
