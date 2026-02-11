@@ -95,6 +95,10 @@ async def run_transcribe_pipeline(
         {"code_post_processed_transcript": code_post_processed_transcript}
     )
 
+    if not code_post_processed_transcript.strip():
+        add_langsmith_metadata_if_trancing_enabled({"silence_or_no_speech": True})
+        return ""
+
     # 3a. Transcribe mode: FAST -  return transcript with code post-processing
     if transcribe_mode == TranscribeMode.FAST:
         return code_post_processed_transcript
