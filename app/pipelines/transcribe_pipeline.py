@@ -1,5 +1,6 @@
 import os
 import asyncio
+import re
 from functools import partial
 from io import BytesIO
 import aiofiles
@@ -34,6 +35,9 @@ from app.services.llm_client import (
 
 
 EventCallback = Callable[[TranscribeStreamEventType, dict], Awaitable[None]]
+
+# Matches transcripts that are only markdown code fences and whitespace
+_EMPTY_FENCE_PATTERN = re.compile(r"(?:\s|```[a-zA-Z]*)+")
 
 async def no_op_event_callback(
     event_type: TranscribeStreamEventType, payload: dict
@@ -126,6 +130,11 @@ class TranscribePipeline:
         code_post_processed_transcript = add_spacing_between_chinese_english(
             code_post_processed_transcript
         )
+        # The transcribe model sometimes wraps a no-speech response in an
+        # empty markdown fence (```plaintext ... ```) instead of returning
+        # the empty string the prompt asks for; normalize before the guard.
+        if _EMPTY_FENCE_PATTERN.fullmatch(code_post_processed_transcript):
+            code_post_processed_transcript = ""
         if not code_post_processed_transcript.strip():
             code_post_processed_transcript = ""
             self._add_langsmith_metadata_if_trancing_enabled(
