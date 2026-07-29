@@ -15,11 +15,8 @@ from app.models import (
     ValidatedAudioFile,
     TranscribeRequestMetadata,
     StreamEventResponse,
-    # TaskStatus,
-    # TaskProcessingProgressCode,
 )
 from app.services.transcribe_stream import TranscribeStreamService
-# from app.services.task_progress import TaskProgressService
 from app.dependencies import (
     validate_file_size,
     get_usage_config,
@@ -27,7 +24,6 @@ from app.dependencies import (
     validate_audio_duration,
     get_redis_client,
 )
-from app.lib.uploadfile_memory import UploadFileInMemory
 from app.config import TEMP_AUDIO_FILES_DIR
 
 router = APIRouter(
@@ -64,15 +60,18 @@ async def start_transcribe_task(
                 filename=validated_audio.file.filename,
             )
 
+            # Re-read from disk: the streamed upload has been consumed by the
+            # chunked write above, so the file on disk is the only full copy.
+            async with aiofiles.open(stored_audio_file_path, "rb") as stored_file:
+                file_content = await stored_file.read()
+
             background_tasks.add_task(
                 audio_storage_service.capture_raw_audio,
-                file_content=content,
+                file_content=file_content,
                 r2_object_key=r2_object_key,
                 original_filename=validated_audio.file.filename,
                 content_type=validated_audio.file.content_type,
             )
-
-            await validated_audio.file.seek(0)  # Reset file pointer to the beginning
 
         # 3. Initialize the transcribe stream service
         redis_client = request.app.state.redis

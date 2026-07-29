@@ -15,10 +15,11 @@ class TranscribeStreamEventType(str, Enum):
     TASK_QUEUED = "TASK_QUEUED"  # Payload: {}
     TASK_STARTED = "TASK_STARTED"  # Payload: { total_chunks: int }
     CHUNK_COMPLETED = (
-        "CHUNK_COMPLETED"  # Payload: { index: int, text: str, duration: float }
+        "CHUNK_COMPLETED"  # Payload: TranscribedResultChunk { chunk_index: int, text: str }
     )
     CHUNKS_CONSOLIDATING = "CHUNKS_CONSOLIDATING"  # Payload: {}
     PUNC_FIXING = "PUNC_FIXING"  # Payload: { consolidated_text: str }
+    REFINING = "REFINING"  # Payload: { consolidated_text: str }
     TASK_FINISHED = "TASK_FINISHED"  # Payload: { final_result: str }
     TASK_FAILED = "TASK_FAILED"  # Payload: { error: str }
 
