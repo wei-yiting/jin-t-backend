@@ -78,6 +78,43 @@ class TestGenerateAudioChunkMetadata:
         assert chunks[0]["end_ms"] == first_duration_ms
 
 
+class TestSliceChunkAndTranscribe:
+    async def test_empty_fence_response_normalized_to_silent_chunk(self, tmp_path):
+        """The transcribe model may wrap a no-speech response in an empty
+        markdown fence; the chunk must still be treated as silent."""
+        emit = AsyncMock()
+        pipeline = _make_pipeline(emit)
+        source = tmp_path / "source.mp3"
+        source.write_bytes(b"fake")
+
+        def fake_slice(src, start_ms, end_ms, dest):
+            with open(dest, "wb") as f:
+                f.write(b"fake-chunk")
+
+        mock_response = MagicMock()
+        mock_response.text = "```plaintext\n```"
+        with (
+            patch(
+                f"{PIPELINE_MODULE}.run_ffmpeg_to_slice_audio_file",
+                side_effect=fake_slice,
+            ),
+            patch(
+                f"{PIPELINE_MODULE}.transcribe_audio_to_text",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
+        ):
+            result = await pipeline.slice_chunk_and_transcribe(
+                {"index": 0, "start_ms": 0, "end_ms": 1000}, str(source)
+            )
+
+        assert result == {"chunk_index": 0, "text": ""}
+        emit.assert_awaited_once_with(
+            TranscribeStreamEventType.CHUNK_COMPLETED,
+            {"chunk_index": 0, "text": ""},
+        )
+
+
 class TestConsolidateChunksText:
     async def test_all_silent_chunks_skip_llm_call(self):
         pipeline = _make_pipeline()
