@@ -1,3 +1,5 @@
+import subprocess
+import json
 from fastapi import UploadFile
 from langsmith import traceable
 
@@ -27,3 +29,67 @@ def parse_audio_duration(audio_duration: str) -> float:
         return 0.0
     except TypeError:
         return 0.0
+
+@traceable(run_type="tool", name="Get_Audio_Duration")
+def run_ffmpeg_to_get_audio_duration(audio_file_path: str) -> int:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_entries",
+        "format=duration",
+        audio_file_path,
+    ]
+    result = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+
+    try:
+        if result.returncode != 0:
+            raise Exception(
+                f"ffprobe failed (returncode={result.returncode}). stderr={result.stderr.strip()!r}"
+            )
+
+        data = json.loads(result.stdout)
+        duration_seconds = float(data["format"]["duration"])
+        return int(duration_seconds * 1000)  # convert to milliseconds
+    except (KeyError, ValueError, json.JSONDecodeError) as e:
+        stdout_preview = (result.stdout or "").strip().replace("\n", "\\n")[:500]
+        stderr_preview = (result.stderr or "").strip().replace("\n", "\\n")[:500]
+        raise Exception(
+            "Failed to get audio duration: "
+            f"{e}. command={command!r}, returncode={result.returncode}, "
+            f"stdout={stdout_preview!r}, stderr={stderr_preview!r}"
+        )
+
+
+@traceable(run_type="tool", name="Slice_Audio_File")
+def run_ffmpeg_to_slice_audio_file(
+    input_path: str,
+    start_ms: int,
+    end_ms: int,
+    output_path: str,
+):
+    start_seconds = start_ms / 1000
+    duration_seconds = (end_ms - start_ms) / 1000
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-v",
+        "error",
+        "-i",
+        input_path,
+        "-ss",
+        str(start_seconds),
+        "-t",
+        str(duration_seconds),
+        "-acodec",
+        "libmp3lame",
+        "-q:a",
+        "4",
+        output_path,
+    ]
+    subprocess.run(command, check=True)
