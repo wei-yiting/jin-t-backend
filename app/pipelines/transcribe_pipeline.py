@@ -1,6 +1,7 @@
 import os
 import asyncio
 from functools import partial
+from io import BytesIO
 import aiofiles
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 from typing import cast, Callable, Awaitable
@@ -12,16 +13,13 @@ from openai import AsyncOpenAI, APIConnectionError, RateLimitError
 from app.config import (
     PUNC_FIX_MODEL_NAME,
     REFINE_MODEL_NAME,
-    TRANSCRIBE_MODEL_NAME,
     TEMP_AUDIO_FILES_DIR,
 )
 from app.models import (
-    TranscribeMode,
-    TranscribeRequestMetadata,
     TranscribeStreamEventType,
     TranscribedResultChunk,
 )
-from app.lib.audio_tools import get_audio_metadata, run_ffmpeg_to_slice_audio_file
+from app.lib.audio_tools import run_ffmpeg_to_slice_audio_file
 from app.lib.transcript_processor import (
     check_transcript_punctuation_health,
     convert_simplified_to_traditional,
@@ -33,7 +31,6 @@ from app.services.llm_client import (
     refine_transcript,
     consolidate_chunks_text,
 )
-from app.lib.uploadfile_memory import UploadFileInMemory
 
 
 EventCallback = Callable[[TranscribeStreamEventType, dict], Awaitable[None]]
@@ -44,107 +41,13 @@ async def no_op_event_callback(
     """No-op event callback that does nothing."""
     pass
 
-# @traceable(run_type="chain", name="JinT_Main_Pipeline")
-# async def run_transcribe_pipeline(
-#     audio_file: UploadFileInMemory,
-#     llm_client: AsyncOpenAI,
-#     transcribe_mode: TranscribeMode,
-#     audio_duration: str | None,
-#     r2_object_key: str | None,
-#     transcribe_request_metadata: TranscribeRequestMetadata,
-#     status_callback: StatusCallback = no_op_status_callback,
-# ):
-#     client = wrap_openai(llm_client)
 
-#     # If tracing is not enabled from tracing_context, run_tree will be None
-#     try:
-#         run_tree = get_current_run_tree()
-#     except Exception:
-#         run_tree = None
+class _AudioFileWithName:
+    """File-like wrapper carrying a filename attribute, required by the OpenAI audio API."""
 
-#     def add_langsmith_metadata_if_trancing_enabled(
-#         new_meatadata: LangsmithRunTreeMetadata,
-#     ):
-#         if run_tree:
-#             run_tree.add_metadata(
-#                 cast(dict[str, str | float | bool | None], new_meatadata)
-#             )
-
-#     # 0. Add already known metadata to the run tree
-#     audio_metadata = get_audio_metadata(audio_file)
-#     known_metadata: LangsmithRunTreeMetadata = {
-#         **audio_metadata,
-#         **transcribe_request_metadata,
-#         "transcribe_mode": transcribe_mode.value,
-#         "transcribe_model_name": TRANSCRIBE_MODEL_NAME,
-#         "audio_duration": float(audio_duration) if audio_duration else None,
-#     }
-
-#     if r2_object_key:
-#         known_metadata.update({"r2_object_key": r2_object_key})
-
-#     add_langsmith_metadata_if_trancing_enabled(known_metadata)
-
-#     # 1. Transcribe audio to text
-#     await status_callback(
-#         TaskProcessingProgressCode.TRANSCRIBING, "正在將語音轉換為文字..."
-#     )
-#     response_from_transcribe = await transcribe_audio_to_text(audio_file, client)
-#     raw_transcript = response_from_transcribe.text
-#     add_langsmith_metadata_if_trancing_enabled({"raw_transcript": raw_transcript})
-
-#     # 2. Post-process with code:
-#     # - Convert simplified Chinese to traditional Chinese if any
-#     # - Add spacing between Chinese and English/numbers/English punctuation marks
-#     code_post_processed_transcript = convert_simplified_to_traditional(raw_transcript)
-#     code_post_processed_transcript = add_spacing_between_chinese_english(
-#         code_post_processed_transcript
-#     )
-#     add_langsmith_metadata_if_trancing_enabled(
-#         {"code_post_processed_transcript": code_post_processed_transcript}
-#     )
-
-#     # 3a. Transcribe mode: FAST -  return transcript with code post-processing
-#     if transcribe_mode == TranscribeMode.FAST:
-#         return code_post_processed_transcript
-
-#     # 3b. Transcribe mode: REFINED - Run LLM to refine the transcript
-#     if transcribe_mode == TranscribeMode.REFINED:
-#         await status_callback(TaskProcessingProgressCode.REFINING, "正在潤飾文字...")
-#         response_from_refine = await refine_transcript(
-#             code_post_processed_transcript, client
-#         )
-#         refined_transcript = response_from_refine.output_text
-#         add_langsmith_metadata_if_trancing_enabled(
-#             {
-#                 "refined_transcript": refined_transcript,
-#                 "refine_model_name": REFINE_MODEL_NAME,
-#             }
-#         )
-#         return refined_transcript
-
-#     # 3c. Transcribe mode: STANDARD - Check punctuation health to determine if LLM post-processing is needed
-#     if check_transcript_punctuation_health(code_post_processed_transcript):
-#         add_langsmith_metadata_if_trancing_enabled({"has_punctuation_fixed": False})
-#         return code_post_processed_transcript
-
-#     await status_callback(
-#         TaskProcessingProgressCode.PUNC_FIXING, "偵測到標點符號問題，正在修正..."
-#     )
-#     response_with_punctuation_fix = await fix_punctuation(
-#         code_post_processed_transcript, client
-#     )
-#     punctuation_fixed_transcript = response_with_punctuation_fix.output_text
-#     add_langsmith_metadata_if_trancing_enabled(
-#         {
-#             "has_punctuation_fixed": True,
-#             "punctuation_fixed_transcript": punctuation_fixed_transcript,
-#             "punc_fix_model_name": PUNC_FIX_MODEL_NAME,
-#         }
-#     )
-
-#     return punctuation_fixed_transcript
-
+    def __init__(self, file_obj: BytesIO, filename: str):
+        self.file = file_obj
+        self.filename = filename
 
 class TranscribePipeline:
     def __init__(
@@ -202,21 +105,10 @@ class TranscribePipeline:
 
         # 2. Transcribe the chunk
         try:
-            # Read file content into memory and create a file-like object with filename
             async with aiofiles.open(chunk_file_path, "rb") as f:
                 file_content = await f.read()
-            
-            # Create a file-like object with filename attribute for OpenAI API
-            from io import BytesIO
-            file_obj = BytesIO(file_content)
-            
-            # Create a simple wrapper to add filename attribute
-            class FileWithName:
-                def __init__(self, file_obj, filename):
-                    self.file = file_obj
-                    self.filename = filename
-            
-            audio_chunk_file = FileWithName(file_obj, chunk_file_path)
+
+            audio_chunk_file = _AudioFileWithName(BytesIO(file_content), chunk_file_path)
             response_from_transcribe = await transcribe_audio_to_text(
                 audio_chunk_file, self.llm_client
             )
@@ -298,6 +190,10 @@ class TranscribePipeline:
                 {"has_punctuation_fixed": False}
             )
             return full_transcript
+        await self.emit_event_callback(
+            TranscribeStreamEventType.PUNC_FIXING,
+            {"consolidated_text": full_transcript},
+        )
         response_with_punctuation_fix = await fix_punctuation(
             full_transcript, self.llm_client
         )
@@ -310,3 +206,23 @@ class TranscribePipeline:
             }
         )
         return punctuation_fixed_transcript
+
+
+    @traceable(run_type="chain", name="Refine_Transcript")
+    async def refine_transcript(self, full_transcript: str) -> str:
+        """Refine the consolidated transcript (REFINED mode)"""
+        await self.emit_event_callback(
+            TranscribeStreamEventType.REFINING,
+            {"consolidated_text": full_transcript},
+        )
+        response_from_refine = await refine_transcript(
+            full_transcript, self.llm_client
+        )
+        refined_transcript = response_from_refine.output_text
+        self._add_langsmith_metadata_if_trancing_enabled(
+            {
+                "refined_transcript": refined_transcript,
+                "refine_model_name": REFINE_MODEL_NAME,
+            }
+        )
+        return refined_transcript
