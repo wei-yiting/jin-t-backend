@@ -312,8 +312,25 @@ class TestRefineTranscript:
 
 
 class TestShortAudioBypassesChunking:
-    """Audio at or below the short-audio threshold is transcribed in one call:
+    """Audio that fits in the first chunk is transcribed in one call:
     no slicing, no LLM consolidation."""
+
+    def test_threshold_matches_first_chunk_duration(self):
+        # The bypass is only correct while the threshold equals the first
+        # chunk's length — any shorter and single-chunk audio still pays for
+        # slicing plus a no-op consolidation.
+        assert (
+            SHORT_AUDIO_MAX_DURATION_MS
+            == INITIAL_CONCURRENT_CHUNK_DURATIONS_SECONDS[0] * 1000
+        )
+        assert (
+            len(
+                TranscribeWorker._generate_audio_chunk_metadata(
+                    SHORT_AUDIO_MAX_DURATION_MS
+                )
+            )
+            == 1
+        )
 
     @staticmethod
     def _make_pipeline_mock() -> MagicMock:
