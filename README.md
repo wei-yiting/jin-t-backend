@@ -22,38 +22,57 @@ Every LLM step is traced end-to-end with **LangSmith** — the failure analysis 
 
 ```mermaid
 flowchart LR
-    subgraph Client
+    subgraph CL["Client"]
         FE[Web App]
     end
 
     subgraph API["FastAPI"]
+        direction TB
         EP["POST /transcribe-tasks"]
-        POLL["GET /transcribe-tasks/{task_id}<br/>(long-polling)"]
+        POLL["GET /transcribe-tasks/{task_id}"]
     end
 
-    subgraph Background["Background Worker (per task)"]
+    subgraph BG["Background Worker (per task)"]
+        direction TB
         W[TranscribeWorker]
         P[TranscribePipeline]
     end
 
-    subgraph Infra
-        R[(Redis Streams<br/>progress events)]
-        R2[(Cloudflare R2<br/>consent-gated audio capture)]
-        OAI[OpenAI API<br/>transcribe + repair models]
-        LS[LangSmith<br/>full-pipeline tracing]
+    subgraph EXT["External Services"]
+        direction TB
+        OAI["OpenAI API<br/>transcribe + repair"]
+        LS["LangSmith<br/>tracing"]
+        R2[("Cloudflare R2<br/>audio capture")]
     end
 
+    R[("Redis Streams<br/>progress events")]
+
     FE -- "audio upload" --> EP
-    EP -- "task_id (immediately)" --> FE
+    EP -- "task_id" --> FE
     EP --> W
     EP -. "if consented" .-> R2
     W --> P
     P <--> OAI
-    W -- XADD events --> R
+    P -. "traces" .-> LS
+    W -- "XADD events" --> R
     FE -- "poll(last_id)" --> POLL
-    POLL -- XREAD (block 20s) --> R
-    P -. traces .-> LS
+    POLL -- "XREAD (block 20 s)" --> R
+
+    classDef client fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
+    classDef api fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef worker fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef ext fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef store fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    classDef zone fill:transparent,stroke:#94a3b8,color:#64748b
+    class FE client
+    class EP,POLL api
+    class W,P worker
+    class OAI,LS,R2 ext
+    class R store
+    class CL,API,BG,EXT zone
 ```
+
+Color legend: 🟦 client · 🟩 API layer · 🟧 background worker · 🟪 external services · 🟨 Redis (task state)
 
 Key decision: the upload request returns a `task_id` immediately and all heavy work happens in a background worker. Progress and results flow through a **Redis Stream** per task, which the client reads via long-polling with a cursor (`last_id`) — so a dropped connection or page refresh resumes exactly where it left off, something plain SSE can't do without extra bookkeeping.
 
@@ -64,20 +83,49 @@ Key decision: the upload request returns a `task_id` immediately and all heavy w
 Long audio is sliced with ffmpeg into overlapping chunks that are transcribed **in parallel** (bounded by a semaphore), then stitched back together by a consolidation LLM that resolves the 5-second overlaps and unifies terminology across chunk boundaries.
 
 ```mermaid
-flowchart TB
-    A[Audio file] --> D{duration ≤ 120 s?}
-    D -- yes --> S1["Single transcribe call<br/>(no slicing, no consolidation)"]
-    D -- no --> CH["Chunk plan: 120 s → 180 s → 240 s → 180 s …<br/>each with 5 s overlap"]
+flowchart LR
+    A[Audio file] --> D{"duration<br/>≤ 120 s?"}
+    D -- "yes" --> S1["Single transcribe call<br/>(no slicing,<br/>no consolidation)"]
+    D -- "no" --> CH["Chunk plan<br/>120 s → 180 s → 240 s<br/>→ 180 s …<br/>5 s overlap"]
     CH --> T1["Chunk 0<br/>transcribe"] & T2["Chunk 1<br/>transcribe"] & T3["Chunk N<br/>transcribe"]
-    T1 & T2 & T3 -- "CHUNK_COMPLETED events<br/>(streamed as each finishes)" --> G["LLM consolidation<br/>dedupe overlaps + unify terms"]
-    S1 --> M
-    G --> M{Transcribe mode}
-    M -- fast --> OUT[Final transcript]
-    M -- standard --> PG{"Punctuation<br/>health check<br/>(heuristics)"}
-    PG -- healthy --> OUT
-    PG -- unhealthy --> FIX["LLM punctuation repair"] --> OUT
-    M -- refined --> REF["LLM refinement"] --> OUT
+    T1 --> G["LLM consolidation<br/>dedupe overlaps<br/>+ unify terms"]
+    T2 -- "CHUNK_COMPLETED<br/>streamed as<br/>each finishes" --> G
+    T3 --> G
+
+    S1 --> CT["Consolidated<br/>transcript"]
+    G --> CT
+
+    classDef code fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
+    classDef llm fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef gate fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    classDef final fill:#dcfce7,stroke:#16a34a,color:#14532d
+    class A,CH,CT code
+    class S1,T1,T2,T3,G llm
+    class D gate
 ```
+
+The consolidated transcript then goes through mode-specific post-processing — note that the LLM boxes below only run when the mode (or the quality gate) demands them:
+
+```mermaid
+flowchart LR
+    CT["Consolidated<br/>transcript"] --> M{"mode?"}
+    M -- "fast" --> OUT[Final transcript]
+    M -- "standard" --> PG{"punctuation<br/>health gate"}
+    PG -- "healthy" --> OUT
+    PG -- "unhealthy" --> FIX["LLM punctuation<br/>repair"] --> OUT
+    M -- "refined" --> REF["LLM<br/>refinement"] --> OUT
+
+    classDef code fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
+    classDef llm fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef gate fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    classDef final fill:#dcfce7,stroke:#16a34a,color:#14532d
+    class CT code
+    class FIX,REF llm
+    class M,PG gate
+    class OUT final
+```
+
+Color legend: 🟦 deterministic code · 🟪 LLM call · 🟨 decision gate · 🟩 output
 
 Design choices worth noting:
 
