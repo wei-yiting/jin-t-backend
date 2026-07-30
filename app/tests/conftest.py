@@ -10,6 +10,11 @@ from fastapi.testclient import TestClient
 os.environ["FREE_TIER_OPENAI_API_KEY"] = "test-free-tier-openai-api-key"
 os.environ["ALLOWED_ORIGINS"] = "http://localhost:3000"
 
+# Tests must never post traces to LangSmith, even when the developer's shell
+# has tracing enabled — @traceable would otherwise do network I/O per call.
+os.environ["LANGSMITH_TRACING"] = "false"
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+
 from app.main import app
 from app.config import MAX_AUDIO_FILE_SIZE_MB
 
