@@ -4,7 +4,13 @@ import os
 from redis.asyncio import Redis
 from openai import AsyncOpenAI, AuthenticationError, BadRequestError
 
-from app.config import MAX_CONCURRENT_TRANSCRIBE_WORKERS, INITIAL_CONCURRENT_CHUNK_DURATIONS_SECONDS, SUBSEQUENT_CHUNK_DURATION_SECONDS, AUDIO_CHUNK_OVERLAP_MS
+from app.config import (
+    MAX_CONCURRENT_TRANSCRIBE_WORKERS,
+    INITIAL_CONCURRENT_CHUNK_DURATIONS_SECONDS,
+    SUBSEQUENT_CHUNK_DURATION_SECONDS,
+    AUDIO_CHUNK_OVERLAP_MS,
+    SHORT_AUDIO_MAX_DURATION_MS,
+)
 from app.models import (
     TranscribeMode,
     TranscribeRequestMetadata,
@@ -39,33 +45,25 @@ class TranscribeWorker:
         transcribe_pipeline = TranscribePipeline(self.llm_client, self.task_id, self.emit_stream_event)
         
         try:
-            # 1. calculate total duration and chunks
+            # 1. calculate total duration
             # In executor: the duration probe may fall back to decoding the
             # whole file, which would otherwise block the event loop.
             loop = asyncio.get_running_loop()
             total_duration_ms = await loop.run_in_executor(
                 None, run_ffmpeg_to_get_audio_duration, file_path
             )
-            chunks = self._generate_audio_chunk_metadata(total_duration_ms)
-            
-            # 2. emit started event
-            await self.emit_stream_event(TranscribeStreamEventType.TASK_STARTED, {
-                "total_chunks": len(chunks)
-            })
-            
-            # 3. execute chunks in parallel (Scatter)
-            tasks = []
-            for chunk in chunks:
-                tasks.append(self._process_chunk_safe(transcribe_pipeline, chunk, file_path))
-            
-            transcribed_result_chunks = await asyncio.gather(*tasks)
-            await self.emit_stream_event(TranscribeStreamEventType.CHUNKS_CONSOLIDATING, {})
 
-            # 4. consolidate chunks text
-            consolidated_text = await transcribe_pipeline.consolidate_chunks_text(transcribed_result_chunks)
+            # 2. short audio goes straight through: one transcribe call, no
+            #    slicing and no consolidation
+            if total_duration_ms <= SHORT_AUDIO_MAX_DURATION_MS:
+                transcript = await self._run_single_call(transcribe_pipeline, file_path)
+            else:
+                transcript = await self._run_chunked(
+                    transcribe_pipeline, file_path, total_duration_ms
+                )
 
-            # 5. mode-specific post-processing on the consolidated transcript
-            final_result = await self._post_process_by_mode(transcribe_pipeline, consolidated_text)
+            # 3. mode-specific post-processing on the full transcript
+            final_result = await self._post_process_by_mode(transcribe_pipeline, transcript)
             await self.emit_stream_event(TranscribeStreamEventType.TASK_FINISHED, {
                 "final_result": final_result
             })
@@ -93,6 +91,34 @@ class TranscribeWorker:
             # [重要] 清理原始大檔
             if os.path.exists(file_path):
                 os.remove(file_path)
+
+    async def _run_single_call(
+        self, pipeline: TranscribePipeline, file_path: str
+    ) -> str:
+        """Transcribe short audio in one call — no slicing, no consolidation."""
+        await self.emit_stream_event(
+            TranscribeStreamEventType.TASK_STARTED, {"total_chunks": 1}
+        )
+        result = await pipeline.transcribe_whole_file(file_path)
+        return result["text"]
+
+    async def _run_chunked(
+        self, pipeline: TranscribePipeline, file_path: str, total_duration_ms: int
+    ) -> str:
+        """Scatter-gather across overlapping chunks, then stitch with an LLM."""
+        chunks = self._generate_audio_chunk_metadata(total_duration_ms)
+
+        await self.emit_stream_event(
+            TranscribeStreamEventType.TASK_STARTED, {"total_chunks": len(chunks)}
+        )
+
+        tasks = [
+            self._process_chunk_safe(pipeline, chunk, file_path) for chunk in chunks
+        ]
+        transcribed_result_chunks = await asyncio.gather(*tasks)
+
+        await self.emit_stream_event(TranscribeStreamEventType.CHUNKS_CONSOLIDATING, {})
+        return await pipeline.consolidate_chunks_text(transcribed_result_chunks)
 
     async def _post_process_by_mode(
         self, pipeline: TranscribePipeline, consolidated_text: str

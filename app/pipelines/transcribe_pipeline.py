@@ -78,6 +78,78 @@ class TranscribePipeline:
             self.run_tree.add_metadata(new_metadata)
 
 
+    async def _transcribe_audio_file(
+        self, audio_file_path: str, error_label: str, remove_after_read: bool = False
+    ) -> str:
+        """Read an audio file into memory and transcribe it."""
+        try:
+            async with aiofiles.open(audio_file_path, "rb") as f:
+                file_content = await f.read()
+
+            audio_file = _AudioFileWithName(BytesIO(file_content), audio_file_path)
+            response_from_transcribe = await transcribe_audio_to_text(
+                audio_file, self.llm_client
+            )
+            return response_from_transcribe.text
+        except Exception as e:
+            raise Exception(f"Failed to transcribe {error_label}: {e}")
+        finally:
+            if remove_after_read and os.path.exists(audio_file_path):
+                os.remove(audio_file_path)
+
+    async def _post_process_and_emit(
+        self, raw_transcript: str, chunk_index: int
+    ) -> TranscribedResultChunk:
+        """Normalize a raw transcript, record it, and stream it to the client."""
+        code_post_processed_transcript = convert_simplified_to_traditional(
+            raw_transcript
+        )
+        code_post_processed_transcript = add_spacing_between_chinese_english(
+            code_post_processed_transcript
+        )
+        # The transcribe model sometimes wraps a no-speech response in an
+        # empty markdown fence (```plaintext ... ```) instead of returning
+        # the empty string the prompt asks for; normalize before the guard.
+        if _EMPTY_FENCE_PATTERN.fullmatch(code_post_processed_transcript):
+            code_post_processed_transcript = ""
+        if not code_post_processed_transcript.strip():
+            code_post_processed_transcript = ""
+            self._add_langsmith_metadata_if_trancing_enabled(
+                {f"chunk_{chunk_index}_silence_or_no_speech": True}
+            )
+        self._add_langsmith_metadata_if_trancing_enabled(
+            {
+                f"chunk_{chunk_index}_transcript": code_post_processed_transcript,
+            }
+        )
+
+        transcribed_result_chunk = TranscribedResultChunk(
+            chunk_index=chunk_index, text=code_post_processed_transcript
+        )
+        await self.emit_event_callback(
+            TranscribeStreamEventType.CHUNK_COMPLETED,
+            cast(dict, transcribed_result_chunk),
+        )
+
+        return transcribed_result_chunk
+
+    @traceable(run_type="chain", name="Transcribe_Post_process_Whole_File")
+    @retry(
+        retry=retry_if_exception_type((APIConnectionError, RateLimitError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10)
+    )
+    async def transcribe_whole_file(self, source_file_path: str) -> TranscribedResultChunk:
+        """Transcribe -> Post-process -> Return stream content.
+
+        Short-audio path: no slicing, so the source file is left for the
+        caller to clean up.
+        """
+        raw_transcript = await self._transcribe_audio_file(
+            source_file_path, error_label="audio file"
+        )
+        return await self._post_process_and_emit(raw_transcript, chunk_index=0)
+
     @traceable(run_type="chain", name="Slice_Transcribe_Post_process_Single_Chunk")
     @retry(
         retry=retry_if_exception_type((APIConnectionError, RateLimitError)),
@@ -108,49 +180,14 @@ class TranscribePipeline:
             raise Exception(f"Failed to slice audio file: {e}")
 
         # 2. Transcribe the chunk
-        try:
-            async with aiofiles.open(chunk_file_path, "rb") as f:
-                file_content = await f.read()
+        raw_transcript = await self._transcribe_audio_file(
+            chunk_file_path,
+            error_label=f"audio chunk file index {chunk_index}",
+            remove_after_read=True,
+        )
 
-            audio_chunk_file = _AudioFileWithName(BytesIO(file_content), chunk_file_path)
-            response_from_transcribe = await transcribe_audio_to_text(
-                audio_chunk_file, self.llm_client
-            )
-            raw_transcript = response_from_transcribe.text
-        except Exception as e:
-            raise Exception(f"Failed to transcribe audio chunk file index {chunk_index}: {e}")
-        finally:
-            if os.path.exists(chunk_file_path):
-                os.remove(chunk_file_path)
-
-        # 3. Post-process the chunk
-        code_post_processed_transcript = convert_simplified_to_traditional(
-            raw_transcript
-        )
-        code_post_processed_transcript = add_spacing_between_chinese_english(
-            code_post_processed_transcript
-        )
-        # The transcribe model sometimes wraps a no-speech response in an
-        # empty markdown fence (```plaintext ... ```) instead of returning
-        # the empty string the prompt asks for; normalize before the guard.
-        if _EMPTY_FENCE_PATTERN.fullmatch(code_post_processed_transcript):
-            code_post_processed_transcript = ""
-        if not code_post_processed_transcript.strip():
-            code_post_processed_transcript = ""
-            self._add_langsmith_metadata_if_trancing_enabled(
-                {f"chunk_{chunk_index}_silence_or_no_speech": True}
-            )
-        # 4. Add metadata to the run tree, emit event and return transcribed result chunk
-        self._add_langsmith_metadata_if_trancing_enabled(
-            {
-                f"chunk_{chunk_index}_transcript": code_post_processed_transcript,
-            }
-        )
-        
-        transcribed_result_chunk = TranscribedResultChunk(chunk_index=chunk_index, text=code_post_processed_transcript)
-        await self.emit_event_callback(TranscribeStreamEventType.CHUNK_COMPLETED, cast(dict, transcribed_result_chunk))
-        
-        return transcribed_result_chunk
+        # 3. Post-process, emit and return
+        return await self._post_process_and_emit(raw_transcript, chunk_index)
 
 
     @traceable(run_type="chain", name="Consolidate_Chunks_Text")
