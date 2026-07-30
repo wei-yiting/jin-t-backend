@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from app.config import (
     INITIAL_CONCURRENT_CHUNK_DURATIONS_SECONDS,
     AUDIO_CHUNK_OVERLAP_MS,
+    SHORT_AUDIO_MAX_DURATION_MS,
 )
 from app.models import TranscribeMode, TranscribeStreamEventType, TranscribedResultChunk
 from app.pipelines.transcribe_pipeline import TranscribePipeline
@@ -308,6 +309,79 @@ class TestRefineTranscript:
             TranscribeStreamEventType.REFINING,
             {"consolidated_text": "raw"},
         )
+
+
+class TestShortAudioBypassesChunking:
+    """Audio at or below the short-audio threshold is transcribed in one call:
+    no slicing, no LLM consolidation."""
+
+    @staticmethod
+    def _make_pipeline_mock() -> MagicMock:
+        return MagicMock(
+            transcribe_whole_file=AsyncMock(
+                return_value=TranscribedResultChunk(chunk_index=0, text="short text")
+            ),
+            slice_chunk_and_transcribe=AsyncMock(),
+            consolidate_chunks_text=AsyncMock(return_value="consolidated"),
+            check_and_fix_punctuation=AsyncMock(side_effect=lambda t: t),
+        )
+
+    async def _run_with_duration(self, duration_ms: int, tmp_path):
+        audio_file = tmp_path / "audio.mp3"
+        audio_file.write_bytes(b"fake")
+        worker = _make_worker(TranscribeMode.STANDARD)
+        pipeline = self._make_pipeline_mock()
+
+        with (
+            patch(
+                "app.workers.transcribe_worker.TranscribePipeline",
+                return_value=pipeline,
+            ),
+            patch(
+                "app.workers.transcribe_worker.run_ffmpeg_to_get_audio_duration",
+                return_value=duration_ms,
+            ),
+        ):
+            await worker.run(str(audio_file))
+
+        emitted = [
+            call.args[1]
+            for call in worker.transcribe_stream_service.emit_event.await_args_list
+        ]
+        return pipeline, emitted
+
+    async def test_short_audio_skips_slicing_and_consolidation(self, tmp_path):
+        pipeline, emitted = await self._run_with_duration(30_000, tmp_path)
+
+        pipeline.transcribe_whole_file.assert_awaited_once()
+        pipeline.slice_chunk_and_transcribe.assert_not_awaited()
+        pipeline.consolidate_chunks_text.assert_not_awaited()
+        assert TranscribeStreamEventType.CHUNKS_CONSOLIDATING not in emitted
+        assert TranscribeStreamEventType.TASK_FINISHED in emitted
+
+    async def test_short_audio_still_reports_one_chunk(self, tmp_path):
+        _, emitted = await self._run_with_duration(30_000, tmp_path)
+
+        assert emitted[0] == TranscribeStreamEventType.TASK_STARTED
+        assert TranscribeStreamEventType.TASK_FAILED not in emitted
+
+    async def test_exactly_at_threshold_uses_single_call(self, tmp_path):
+        pipeline, _ = await self._run_with_duration(
+            SHORT_AUDIO_MAX_DURATION_MS, tmp_path
+        )
+
+        pipeline.transcribe_whole_file.assert_awaited_once()
+        pipeline.consolidate_chunks_text.assert_not_awaited()
+
+    async def test_just_over_threshold_uses_chunked_path(self, tmp_path):
+        pipeline, emitted = await self._run_with_duration(
+            SHORT_AUDIO_MAX_DURATION_MS + 1, tmp_path
+        )
+
+        pipeline.transcribe_whole_file.assert_not_awaited()
+        pipeline.slice_chunk_and_transcribe.assert_awaited()
+        pipeline.consolidate_chunks_text.assert_awaited_once()
+        assert TranscribeStreamEventType.CHUNKS_CONSOLIDATING in emitted
 
 
 class TestWorkerRunFailure:
