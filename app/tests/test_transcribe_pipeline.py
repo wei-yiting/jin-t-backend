@@ -46,6 +46,60 @@ def _make_worker(mode: TranscribeMode) -> TranscribeWorker:
     return worker
 
 
+class TestGetAudioDuration:
+    """run_ffmpeg_to_get_audio_duration falls back to decoding when the
+    container has no duration header (e.g. browser MediaRecorder uploads)."""
+
+    @staticmethod
+    def _proc(returncode: int, stdout: str) -> MagicMock:
+        return MagicMock(returncode=returncode, stdout=stdout, stderr="")
+
+    @staticmethod
+    def _patch_subprocess(**kwargs):
+        # Replace the `subprocess` name inside audio_tools only — patching the
+        # global subprocess.run would also intercept unrelated callers
+        # (e.g. langsmith collecting git metadata on trace upload).
+        from app.lib import audio_tools
+
+        fake = MagicMock()
+        fake.PIPE = object()
+        fake.run = MagicMock(**kwargs)
+        return patch.object(audio_tools, "subprocess", fake), fake
+
+    def test_container_duration_used_when_present(self):
+        from app.lib import audio_tools
+
+        patcher, fake = self._patch_subprocess(
+            return_value=self._proc(0, '{"format": {"duration": "863.928934"}}')
+        )
+        with patcher:
+            assert audio_tools.run_ffmpeg_to_get_audio_duration("x.mp3") == 863928
+        assert fake.run.call_count == 1
+
+    def test_empty_probe_falls_back_to_decoding(self):
+        from app.lib import audio_tools
+
+        patcher, fake = self._patch_subprocess(
+            side_effect=[
+                self._proc(0, '{\n "format": {\n\n }\n}'),
+                self._proc(0, "out_time_ms=29994000\nprogress=end\n"),
+            ]
+        )
+        with patcher:
+            assert audio_tools.run_ffmpeg_to_get_audio_duration("x.mp3") == 29994
+        assert fake.run.call_count == 2
+
+    def test_raises_when_decoding_also_fails(self):
+        from app.lib import audio_tools
+
+        patcher, _ = self._patch_subprocess(
+            side_effect=[self._proc(0, '{"format": {}}'), self._proc(1, "")]
+        )
+        with patcher:
+            with pytest.raises(Exception, match="by decoding"):
+                audio_tools.run_ffmpeg_to_get_audio_duration("x.mp3")
+
+
 class TestGenerateAudioChunkMetadata:
     def test_zero_duration_returns_no_chunks(self):
         assert TranscribeWorker._generate_audio_chunk_metadata(0) == []

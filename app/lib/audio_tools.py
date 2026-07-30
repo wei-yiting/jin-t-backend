@@ -30,7 +30,9 @@ def parse_audio_duration(audio_duration: str) -> float:
     except TypeError:
         return 0.0
 
-@traceable(run_type="tool", name="Get_Audio_Duration")
+# Not @traceable: this runs on the task-start critical path and LangSmith
+# posting adds erratic multi-second latency; the duration is already visible
+# in the chunk metadata of the traced pipeline spans.
 def run_ffmpeg_to_get_audio_duration(audio_file_path: str) -> int:
     command = [
         "ffprobe",
@@ -46,23 +48,59 @@ def run_ffmpeg_to_get_audio_duration(audio_file_path: str) -> int:
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
 
-    try:
-        if result.returncode != 0:
-            raise Exception(
-                f"ffprobe failed (returncode={result.returncode}). stderr={result.stderr.strip()!r}"
-            )
+    if result.returncode == 0:
+        try:
+            data = json.loads(result.stdout)
+            duration_seconds = float(data["format"]["duration"])
+            return int(duration_seconds * 1000)  # convert to milliseconds
+        except (KeyError, ValueError, json.JSONDecodeError):
+            # Live-recorded uploads (e.g. browser MediaRecorder) stream their
+            # container and never write a duration header, so the probe comes
+            # back empty; fall through to measuring by decoding.
+            pass
 
-        data = json.loads(result.stdout)
-        duration_seconds = float(data["format"]["duration"])
-        return int(duration_seconds * 1000)  # convert to milliseconds
-    except (KeyError, ValueError, json.JSONDecodeError) as e:
-        stdout_preview = (result.stdout or "").strip().replace("\n", "\\n")[:500]
+    return _measure_audio_duration_by_decoding(audio_file_path)
+
+
+def _measure_audio_duration_by_decoding(audio_file_path: str) -> int:
+    """Decode the audio through the null muxer and read the final progress
+    timestamp. Slower than probing the header, but works for containers that
+    carry no duration metadata."""
+    command = [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-nostats",
+        "-progress",
+        "pipe:1",
+        "-i",
+        audio_file_path,
+        "-f",
+        "null",
+        "-",
+    ]
+    result = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+
+    last_out_time_us = None
+    for line in result.stdout.splitlines():
+        # ffmpeg's out_time_ms is microseconds despite the name
+        if line.startswith("out_time_ms="):
+            try:
+                last_out_time_us = int(line.split("=", 1)[1])
+            except ValueError:
+                continue
+
+    if result.returncode != 0 or last_out_time_us is None or last_out_time_us <= 0:
         stderr_preview = (result.stderr or "").strip().replace("\n", "\\n")[:500]
         raise Exception(
-            "Failed to get audio duration: "
-            f"{e}. command={command!r}, returncode={result.returncode}, "
-            f"stdout={stdout_preview!r}, stderr={stderr_preview!r}"
+            "Failed to get audio duration by decoding: "
+            f"command={command!r}, returncode={result.returncode}, "
+            f"out_time={last_out_time_us!r}, stderr={stderr_preview!r}"
         )
+
+    return last_out_time_us // 1000
 
 
 @traceable(run_type="tool", name="Slice_Audio_File")

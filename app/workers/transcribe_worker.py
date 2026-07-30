@@ -40,7 +40,12 @@ class TranscribeWorker:
         
         try:
             # 1. calculate total duration and chunks
-            total_duration_ms = run_ffmpeg_to_get_audio_duration(file_path)
+            # In executor: the duration probe may fall back to decoding the
+            # whole file, which would otherwise block the event loop.
+            loop = asyncio.get_running_loop()
+            total_duration_ms = await loop.run_in_executor(
+                None, run_ffmpeg_to_get_audio_duration, file_path
+            )
             chunks = self._generate_audio_chunk_metadata(total_duration_ms)
             
             # 2. emit started event
