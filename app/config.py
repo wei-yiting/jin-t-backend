@@ -45,8 +45,9 @@ MAX_CONCURRENT_TRANSCRIBE_WORKERS = 3
 INITIAL_CONCURRENT_CHUNK_DURATIONS_SECONDS = [120, 180, 240]
 SUBSEQUENT_CHUNK_DURATION_SECONDS = 180
 AUDIO_CHUNK_OVERLAP_MS = 5000
-# At or below this length the audio is transcribed in a single call: slicing
-# and LLM consolidation would only add latency and boundary-stitching risk.
-SHORT_AUDIO_MAX_DURATION_MS = 60 * 1000
+# Audio that fits inside the first chunk is transcribed in a single call:
+# slicing it would re-encode the whole file to produce one chunk, and
+# consolidation would run with no boundaries to stitch.
+SHORT_AUDIO_MAX_DURATION_MS = INITIAL_CONCURRENT_CHUNK_DURATIONS_SECONDS[0] * 1000
 
 os.makedirs(TEMP_AUDIO_FILES_DIR, exist_ok=True)
