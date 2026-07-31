@@ -258,4 +258,4 @@ pytest app/tests -v
 Deeper dives into the engineering decisions in this repo, by the author:
 
 - **"How I Designed a Code + LLM Hybrid Architecture to Fix Unstable AI Output Quality"** — cost-tiered optimization: deterministic code, prompt iteration, and error-rate-driven conditional LLM repair. ([Medium](https://medium.com/@wytdong/ai-application-%E9%96%8B%E7%99%BC%E5%AF%A6%E6%88%B0-%E6%88%91%E6%98%AF%E5%A6%82%E4%BD%95%E8%A8%AD%E8%A8%88-code-llm-%E6%B7%B7%E5%90%88%E6%9E%B6%E6%A7%8B-%E8%A7%A3%E6%B1%BA-openai-api-%E7%9A%84%E5%9B%9E%E6%87%89%E4%B8%8D%E7%A9%A9%E5%95%8F%E9%A1%8C-c71e1b36a6d1))
-- **Talk: Agent Observability & Evaluation** — tracing, evaluation datasets, and failure analysis for LLM systems.
+- **Talk: Agent Observability & Evaluation** — tracing, evaluation datasets, and failure analysis for LLM systems. ([Slides](https://docs.google.com/presentation/d/103yxXhcqoV-vw3QB00NKDVfVbI41nchdMlZ3a702l6E/present))
