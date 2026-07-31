@@ -25,6 +25,7 @@ from app.dependencies import (
     get_redis_client,
 )
 from app.config import TEMP_AUDIO_FILES_DIR
+from app.lib.audio_tools import resolve_audio_file_extension
 
 router = APIRouter(
     prefix="/transcribe-tasks",
@@ -44,10 +45,17 @@ async def start_transcribe_task(
 ) -> dict[str, str]:
     request_id = str(uuid.uuid4())
 
+    # Validated before the try block so its 400 is not swallowed into a 500.
+    # The stored file must keep the uploaded extension: short audio is sent to
+    # the transcription API as-is, and that API reads the container format from
+    # the filename — a browser `.webm` recording stored as `.mp3` is rejected
+    # as corrupted.
+    audio_file_extension = resolve_audio_file_extension(validated_audio.file.filename)
+
     try:
         # 1. Read audio file to bytes to avoid the UploadFile being deleted after the request is completed
         #    so file content can be used in the background task even after this POST request is completed
-        stored_audio_file_path=f"{TEMP_AUDIO_FILES_DIR}/{request_id}.mp3"
+        stored_audio_file_path=f"{TEMP_AUDIO_FILES_DIR}/{request_id}{audio_file_extension}"
         async with aiofiles.open(stored_audio_file_path, 'wb') as stored_audio_file:
             while content := await validated_audio.file.read(1024 * 1024): 
                 await stored_audio_file.write(content)

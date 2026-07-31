@@ -50,4 +50,12 @@ AUDIO_CHUNK_OVERLAP_MS = 5000
 # consolidation would run with no boundaries to stitch.
 SHORT_AUDIO_MAX_DURATION_MS = INITIAL_CONCURRENT_CHUNK_DURATIONS_SECONDS[0] * 1000
 
+# The transcription API infers the container format from the filename it is
+# given, so a stored upload must keep the extension it arrived with. Anything
+# outside this set is rejected rather than guessed at.
+# https://platform.openai.com/docs/guides/speech-to-text
+SUPPORTED_AUDIO_EXTENSIONS = frozenset(
+    {".flac", ".m4a", ".mp3", ".mp4", ".mpeg", ".mpga", ".oga", ".ogg", ".wav", ".webm"}
+)
+
 os.makedirs(TEMP_AUDIO_FILES_DIR, exist_ok=True)

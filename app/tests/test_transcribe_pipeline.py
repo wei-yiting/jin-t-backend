@@ -7,6 +7,7 @@ from app.config import (
     INITIAL_CONCURRENT_CHUNK_DURATIONS_SECONDS,
     AUDIO_CHUNK_OVERLAP_MS,
     SHORT_AUDIO_MAX_DURATION_MS,
+    SUPPORTED_AUDIO_EXTENSIONS,
 )
 from app.models import TranscribeMode, TranscribeStreamEventType, TranscribedResultChunk
 from app.pipelines.transcribe_pipeline import TranscribePipeline
@@ -45,6 +46,48 @@ def _make_worker(mode: TranscribeMode) -> TranscribeWorker:
     )
     worker.transcribe_stream_service = MagicMock(emit_event=AsyncMock())
     return worker
+
+
+class TestResolveAudioFileExtension:
+    """The stored file must keep the uploaded extension — the transcription API
+    reads the container format from the filename, so a `.webm` recording stored
+    as `.mp3` comes back as 'corrupted or unsupported'."""
+
+    def test_keeps_browser_recording_extension(self):
+        from app.lib.audio_tools import resolve_audio_file_extension
+
+        assert resolve_audio_file_extension("recording.webm") == ".webm"
+
+    def test_normalizes_case(self):
+        from app.lib.audio_tools import resolve_audio_file_extension
+
+        assert resolve_audio_file_extension("Recording.MP3") == ".mp3"
+
+    @pytest.mark.parametrize(
+        "filename", ["recording.webm", "a.mp3", "b.m4a", "c.wav", "d.ogg", "e.mp4"]
+    )
+    def test_accepts_supported_formats(self, filename):
+        from app.lib.audio_tools import resolve_audio_file_extension
+
+        assert resolve_audio_file_extension(filename) in SUPPORTED_AUDIO_EXTENSIONS
+
+    @pytest.mark.parametrize("filename", ["notes.txt", "noextension", "", None])
+    def test_rejects_unsupported_or_missing(self, filename):
+        from fastapi import HTTPException
+        from app.lib.audio_tools import resolve_audio_file_extension
+
+        with pytest.raises(HTTPException) as exc:
+            resolve_audio_file_extension(filename)
+        assert exc.value.status_code == 400
+
+    def test_path_traversal_in_filename_is_rejected(self):
+        from fastapi import HTTPException
+        from app.lib.audio_tools import resolve_audio_file_extension
+
+        # A crafted name must not smuggle a path out of the temp directory
+        with pytest.raises(HTTPException):
+            resolve_audio_file_extension("../../etc/passwd")
+        assert resolve_audio_file_extension("../../evil/recording.webm") == ".webm"
 
 
 class TestGetAudioDuration:

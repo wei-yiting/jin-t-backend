@@ -1,5 +1,7 @@
 """Integration tests for the task-based transcribe endpoints."""
 
+from io import BytesIO
+
 from app.models import TranscribeMode
 
 
@@ -103,6 +105,51 @@ class TestStartTranscribeTask:
         mock_task_infra["storage"].capture_raw_audio.assert_not_awaited()
         worker_kwargs = mock_task_infra["worker_cls"].call_args.kwargs
         assert worker_kwargs["r2_object_key"] is None
+
+
+class TestUploadFormatIsPreserved:
+    """Regression: the worker receives a path whose extension matches the
+    upload. Short audio is handed to the transcription API unmodified, and that
+    API infers the container format from the filename — storing a browser
+    `.webm` recording as `.mp3` makes it reject the audio as corrupted."""
+
+    def test_browser_webm_recording_keeps_its_extension(
+        self, client, mock_task_infra
+    ):
+        recording = ("recording.webm", BytesIO(b"fake webm data" * 100), "audio/webm")
+
+        response = client.post(
+            "/transcribe-tasks?mode=standard",
+            files={"audio_file": recording},
+            headers=FREE_TIER_HEADERS,
+        )
+
+        assert response.status_code == 200
+        file_path = mock_task_infra["worker"].run.await_args.kwargs["file_path"]
+        assert file_path.endswith(".webm"), file_path
+
+    def test_mp3_upload_keeps_its_extension(self, client, small_audio_file, mock_task_infra):
+        response = client.post(
+            "/transcribe-tasks?mode=standard",
+            files={"audio_file": small_audio_file},
+            headers=FREE_TIER_HEADERS,
+        )
+
+        assert response.status_code == 200
+        file_path = mock_task_infra["worker"].run.await_args.kwargs["file_path"]
+        assert file_path.endswith(".mp3"), file_path
+
+    def test_unsupported_format_is_rejected_with_400(self, client, mock_task_infra):
+        bad = ("notes.txt", BytesIO(b"not audio at all" * 100), "text/plain")
+
+        response = client.post(
+            "/transcribe-tasks?mode=standard",
+            files={"audio_file": bad},
+            headers=FREE_TIER_HEADERS,
+        )
+
+        assert response.status_code == 400
+        mock_task_infra["worker"].run.assert_not_awaited()
 
 
 class TestGetTaskProgress:
