@@ -35,11 +35,6 @@ class TranscribeRequestMetadata(TypedDict, total=False):
     using_personal_api_key: bool
 
 
-class AudioMetadataFromRequest(TypedDict, total=False):
-    audio_file_content_type: str | None
-    audio_file_size_mb: float
-    
-
 class AudioChunkMetadata(TypedDict):
     index: int
     start_ms: int
