@@ -1,5 +1,7 @@
 FROM python:3.11.14-alpine3.22
 
+RUN apk add --no-cache ffmpeg
+
 WORKDIR /code
 
 COPY requirements.txt .
@@ -9,6 +11,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
     
 COPY ./app /code/app
 
-EXPOSE 8000
+EXPOSE 10000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10000"]
