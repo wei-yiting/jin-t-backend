@@ -1,6 +1,6 @@
 # Jin-T Backend — Bilingual Speech-to-Text Service
 
-FastAPI backend for **Jin-T**, a speech-to-text web app built for **code-switched Chinese–English dictation** (the way people in Taiwan actually speak: 中文 sentences with English technical terms mixed in).
+FastAPI backend for [**Jin-T (晶晶體)**](https://github.com/wei-yiting/jin-t-frontend), a speech-to-text web app built for **code-switched Chinese–English dictation** (the way people in Taiwan actually speak: 中文 sentences with English technical terms mixed in).
 
 It turns a single raw audio upload into a clean, traditional-Chinese transcript with correct 中英 spacing and punctuation — streaming partial results to the client while long recordings are still being processed.
 
@@ -8,7 +8,7 @@ It turns a single raw audio upload into a clean, traditional-Chinese transcript 
 
 | Problem | Solution in this repo | Result |
 |---|---|---|
-| Transcription models truncate / degrade on long audio (attention ceiling) | **Chunked scatter-gather pipeline**: ffmpeg segmentation → parallel transcription → LLM consolidation | No practical length ceiling; a 20-min recording transcribes as reliably as a 2-min one |
+| The transcription model has an **output-length ceiling**: it accepts a long file, transcribes the beginning, and reports success — silent truncation | **Chunked scatter-gather pipeline**: ffmpeg segmentation → parallel transcription → LLM consolidation | Measured on a 14.4-min recording: **~9,800 characters vs ~300** from a single call |
 | User stares at a spinner for minutes | **Per-chunk streaming** over Redis Streams with warm-up chunk sizing (first chunk = 120 s) | Time-to-first-token **~7 s on a 20-minute recording** |
 | LLM post-processing is unstable (~25% output-failure rate observed via tracing) | **Code + LLM fallback architecture**: deterministic post-processing always runs; a rule-based quality gate triggers conditional LLM repair | Stable output quality at a fraction of the LLM cost |
 | Silent audio triggers model hallucination | Empty-fence normalization + all-silent short-circuit (skip consolidation entirely) | No fabricated text on silence |
@@ -78,6 +78,49 @@ Key decision: the upload request returns a `task_id` immediately and all heavy w
 
 ## The Transcription Pipeline
 
+### Pipeline at a glance
+
+The worker probes the audio duration and routes on it: audio that fits inside the first chunk is transcribed in one call; longer audio goes through the chunked scatter-gather path. Both converge on the same mode-specific post-processing, and both emit the same stream events — the client never needs to know which path ran.
+
+```mermaid
+flowchart TB
+    A[Upload] --> B["Probe duration<br/>(ffmpeg)"]
+    B -- "fits in one chunk" --> C["Transcribe whole file<br/>(single call)"]
+    B -- "longer" --> D["ffmpeg slice into<br/>overlapping chunks"]
+    D --> E["Parallel transcribe<br/>bounded concurrency + retry"]
+    E --> F["LLM consolidation<br/>stitch chunk boundaries"]
+    C --> G["Mode post-processing<br/>FAST / STANDARD / REFINED"]
+    F --> G
+    G --> H[TASK_FINISHED]
+    E -. "CHUNK_COMPLETED ×N" .-> I[("Redis Stream")]
+    C -. "CHUNK_COMPLETED ×1" .-> I
+
+    classDef code fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
+    classDef llm fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef gate fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    classDef final fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef store fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    class A,B,D code
+    class C,E,F llm
+    class G gate
+    class H final
+    class I store
+```
+
+Color legend: 🟦 deterministic code · 🟪 LLM call · 🟨 decision/mode dispatch & Redis · 🟩 output
+
+### Why chunk at all: silent truncation, measured
+
+The transcription model's ceiling is on **output** length, not input. Feed it a long recording and it accepts the whole file, transcribes the beginning, and stops — no error raised, the task reports success while returning a fraction of the content. Measured on a 14.4-minute recording:
+
+| | Single call | Chunked pipeline |
+|---|---|---|
+| Reported status | completed | completed |
+| Wall clock | 28 s | 63 s |
+| Characters returned | ~300 | ~9,800 |
+
+The single-call version was faster only because it silently skipped 97% of the work. The pipeline exists to fix that data loss, not to make anything faster.
+
 ### Scatter-gather over overlapping chunks
 
 Long audio is sliced with ffmpeg into overlapping chunks that are transcribed **in parallel** (bounded by a semaphore), then stitched back together by a consolidation LLM that resolves the 5-second overlaps and unifies terminology across chunk boundaries.
@@ -104,7 +147,29 @@ flowchart LR
     class D gate
 ```
 
-The consolidated transcript then goes through mode-specific post-processing — note that the LLM boxes below only run when the mode (or the quality gate) demands them:
+Color legend: 🟦 deterministic code · 🟪 LLM call · 🟨 decision gate
+
+Design choices worth noting:
+
+| Choice | Why |
+|---|---|
+| **Warm-up chunk sizes** (120 s, 180 s, 240 s, then 180 s steady-state) | The first chunk finishes fastest → first visible text in ~7 s, while later, larger chunks keep the total API-call count low |
+| **5 s overlap between chunks** | A cut mid-word would corrupt both sides; the overlap gives the consolidation LLM context to stitch seamlessly |
+| **LLM consolidation instead of string concat** | Overlap dedup is not a string problem — the same speech transcribes slightly differently in two chunks; terminology can also drift between chunks |
+| **Duration probe with decode fallback** | Browser `MediaRecorder` uploads stream their container while recording and never write a duration header, so `ffprobe` sees nothing; the probe falls back to decoding the file end-to-end (run in an executor so it never blocks the event loop) |
+| **≤ 120 s → single call** | Slicing a file that fits in the first chunk would just re-encode it and run consolidation with nothing to stitch; the threshold is *derived from* the first chunk size, so the two can't drift apart |
+
+### Code + LLM fallback: cost-tiered post-processing
+
+LangSmith traces showed ~25% of raw transcripts had quality issues (missing punctuation, simplified characters, cramped 中英 boundaries). Fixing everything with an LLM would be expensive *and* unstable — the repair model itself sometimes misbehaves. So post-processing is tiered:
+
+| Tier | Mechanism | Runs |
+|---|---|---|
+| 1. Deterministic code | Simplified→Traditional conversion (`zhconv`), 中英 spacing insertion, empty-markdown-fence normalization | **Always**, per chunk |
+| 2. Rule-based quality gate | Punctuation health heuristics (ending punctuation, semantic-units-per-punctuation ratio, short-text exemption) | Always, on the full transcript (`standard` mode) |
+| 3. Conditional LLM repair | `gpt-4.1-nano` punctuation fix / refinement, temperature 0 | **Only when the gate fails** (or in `refined` mode) |
+
+The consolidated transcript flows through these tiers as follows — the LLM boxes only run when the mode (or the quality gate) demands them:
 
 ```mermaid
 flowchart LR
@@ -127,26 +192,6 @@ flowchart LR
 
 Color legend: 🟦 deterministic code · 🟪 LLM call · 🟨 decision gate · 🟩 output
 
-Design choices worth noting:
-
-| Choice | Why |
-|---|---|
-| **Warm-up chunk sizes** (120 s, 180 s, 240 s, then 180 s steady-state) | The first chunk finishes fastest → first visible text in ~7 s, while later, larger chunks keep the total API-call count low |
-| **5 s overlap between chunks** | A cut mid-word would corrupt both sides; the overlap gives the consolidation LLM context to stitch seamlessly |
-| **LLM consolidation instead of string concat** | Overlap dedup is not a string problem — the same speech transcribes slightly differently in two chunks; terminology can also drift between chunks |
-| **Duration probe with decode fallback** | Some containers carry no duration header; the probe falls back to decoding (run in an executor so it never blocks the event loop) |
-| **≤ 120 s → single call** | Slicing a file that fits in the first chunk would just re-encode it and run consolidation with nothing to stitch; the threshold is *derived from* the first chunk size, so the two can't drift apart |
-
-### Code + LLM fallback: cost-tiered post-processing
-
-LangSmith traces showed ~25% of raw transcripts had quality issues (missing punctuation, simplified characters, cramped 中英 boundaries). Fixing everything with an LLM would be expensive *and* unstable — the repair model itself sometimes misbehaves. So post-processing is tiered:
-
-| Tier | Mechanism | Runs |
-|---|---|---|
-| 1. Deterministic code | Simplified→Traditional conversion (`zhconv`), 中英 spacing insertion, empty-markdown-fence normalization | **Always**, per chunk |
-| 2. Rule-based quality gate | Punctuation health heuristics (ending punctuation, semantic-units-per-punctuation ratio, short-text exemption) | Always, on the full transcript (`standard` mode) |
-| 3. Conditional LLM repair | `gpt-4.1-nano` punctuation fix / refinement, temperature 0 | **Only when the gate fails** (or in `refined` mode) |
-
 Cheap deterministic code handles the common case; the LLM is a targeted fallback, invoked only when heuristics prove the output is broken. The gate outcome is recorded as trace metadata, so the fallback rate is measurable, not guessed.
 
 ### Silence-hallucination guard
@@ -163,6 +208,31 @@ Transcription models hallucinate plausible sentences on silent input, and the co
 | `fast` | ✅ | ✅ | — | — |
 | `standard` | ✅ | ✅ | ✅ | — |
 | `refined` | ✅ | ✅ | — | ✅ |
+
+## API Surface
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/transcribe-tasks?mode={fast\|standard\|refined}` | Accept audio, schedule the worker, return `task_id` |
+| `GET` | `/transcribe-tasks/{task_id}?last_id={cursor}` | Long-poll the event stream from a cursor |
+| `POST` | `/validate-openai-api-key` | Check a user-supplied key |
+| `GET` | `/livez` | Liveness probe |
+
+Request headers on `POST /transcribe-tasks`: `X-Device-Id`, `X-Audio-Duration`, `X-Consent-Data-Collection`, `X-Custom-Openai-Api-Key` (empty to use the free tier).
+
+Stream events the client can receive:
+
+| Event | Payload |
+|---|---|
+| `TASK_QUEUED` | — |
+| `TASK_STARTED` | `total_chunks` |
+| `CHUNK_COMPLETED` | `chunk_index`, `text` |
+| `CHUNKS_CONSOLIDATING` | — |
+| `PUNC_FIXING` / `REFINING` | `consolidated_text` |
+| `TASK_FINISHED` | `final_result` |
+| `TASK_FAILED` | `error` |
+
+The single-call (short audio) path emits the same events minus `CHUNKS_CONSOLIDATING`, reporting `total_chunks: 1` — clients never need to know which path the backend took.
 
 ## Observability
 
