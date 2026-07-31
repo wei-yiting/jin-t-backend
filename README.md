@@ -1,237 +1,261 @@
-# JinJinTi — Transcription Backend
+# Jin-T Backend — Bilingual Speech-to-Text Service
 
-FastAPI service behind [JinJinTi (晶晶體)](https://github.com/wei-yiting/jin-t-frontend), a
-speech-to-text tool for mixed Chinese-English technical dictation. It turns an uploaded or
-recorded audio file into a cleaned-up transcript, streaming partial results to the client while
-the work is still in progress.
+FastAPI backend for **Jin-T**, a speech-to-text web app built for **code-switched Chinese–English dictation** (the way people in Taiwan actually speak: 中文 sentences with English technical terms mixed in).
 
-## Quick start
+It turns a single raw audio upload into a clean, traditional-Chinese transcript with correct 中英 spacing and punctuation — streaming partial results to the client while long recordings are still being processed.
 
-```bash
-cp .env.example .env   # then fill in the values (see Configuration)
-docker compose up -d --build
-curl localhost:8003/livez
-```
+**Highlights at a glance**
 
-The compose stack runs the API (port 8003) and Redis. `ffmpeg` ships inside the image.
-
-## The transcription pipeline
-
-This is the core of the service, and the part worth understanding before changing anything else.
-
-### The problem it solves
-
-The transcription model has a ceiling on **output** length, not input length. Feed it a long
-recording and it will accept the whole file, transcribe the beginning, and stop — without
-raising an error. The task reports success while silently returning a fraction of the content.
-
-Measured on a 14.4-minute recording:
-
-| | Single call | Chunked pipeline |
+| Problem | Solution in this repo | Result |
 |---|---|---|
-| Reported status | completed | completed |
-| Wall clock | 28s | 63s |
-| Characters returned | ~300 | ~9,800 |
+| Transcription models truncate / degrade on long audio (attention ceiling) | **Chunked scatter-gather pipeline**: ffmpeg segmentation → parallel transcription → LLM consolidation | No practical length ceiling; a 20-min recording transcribes as reliably as a 2-min one |
+| User stares at a spinner for minutes | **Per-chunk streaming** over Redis Streams with warm-up chunk sizing (first chunk = 120 s) | Time-to-first-token **~7 s on a 20-minute recording** |
+| LLM post-processing is unstable (~25% output-failure rate observed via tracing) | **Code + LLM fallback architecture**: deterministic post-processing always runs; a rule-based quality gate triggers conditional LLM repair | Stable output quality at a fraction of the LLM cost |
+| Silent audio triggers model hallucination | Empty-fence normalization + all-silent short-circuit (skip consolidation entirely) | No fabricated text on silence |
+| Free tier abuse / key security | Redis sliding-window quotas (device **and** IP), **RSA-encrypted** BYO OpenAI key | Free tier stays affordable; user keys never travel in plaintext |
 
-The single-call version was faster because it silently skipped 97% of the work. The pipeline
-below exists to fix that data loss, not to make anything faster.
+Every LLM step is traced end-to-end with **LangSmith** — the failure analysis that motivated the hybrid architecture came directly from those traces.
 
-### Routing: chunk only when chunking buys something
+---
 
-Slicing costs a full re-encode of the source file, and consolidation costs an LLM call. Neither
-pays off when the audio already fits in one chunk, so the worker measures the duration first and
-routes on it.
+## System Architecture
 
 ```mermaid
-flowchart TB
-    A[upload] --> B[probe duration]
-    B -->|fits in one chunk| C[transcribe whole file]
-    B -->|longer| D[ffmpeg slice into overlapping chunks]
-    D --> E[parallel transcribe<br/>bounded concurrency + retry]
-    E --> F[LLM consolidation<br/>stitch chunk boundaries]
-    C --> G[mode post-processing<br/>FAST / STANDARD / REFINED]
-    F --> G
-    G --> H[TASK_FINISHED]
-    E -.->|CHUNK_COMPLETED ×N| I[(Redis Stream)]
-    C -.->|CHUNK_COMPLETED ×1| I
+flowchart LR
+    subgraph CL["Client"]
+        FE[Web App]
+    end
+
+    subgraph API["FastAPI"]
+        direction TB
+        EP["POST /transcribe-tasks"]
+        POLL["GET /transcribe-tasks/{task_id}"]
+    end
+
+    subgraph BG["Background Worker (per task)"]
+        direction TB
+        W[TranscribeWorker]
+        P[TranscribePipeline]
+    end
+
+    subgraph EXT["External Services"]
+        direction TB
+        OAI["OpenAI API<br/>transcribe + repair"]
+        LS["LangSmith<br/>tracing"]
+        R2[("Cloudflare R2<br/>audio capture")]
+    end
+
+    R[("Redis Streams<br/>progress events")]
+
+    FE -- "audio upload" --> EP
+    EP -- "task_id" --> FE
+    EP --> W
+    EP -. "if consented" .-> R2
+    W --> P
+    P <--> OAI
+    P -. "traces" .-> LS
+    W -- "XADD events" --> R
+    FE -- "poll(last_id)" --> POLL
+    POLL -- "XREAD (block 20 s)" --> R
+
+    classDef client fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
+    classDef api fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef worker fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef ext fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef store fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    classDef zone fill:transparent,stroke:#94a3b8,color:#64748b
+    class FE client
+    class EP,POLL api
+    class W,P worker
+    class OAI,LS,R2 ext
+    class R store
+    class CL,API,BG,EXT zone
 ```
 
-The threshold is derived, not hardcoded:
+Color legend: 🟦 client · 🟩 API layer · 🟧 background worker · 🟪 external services · 🟨 Redis (task state)
 
-```python
-SHORT_AUDIO_MAX_DURATION_MS = INITIAL_CONCURRENT_CHUNK_DURATIONS_SECONDS[0] * 1000
-```
+Key decision: the upload request returns a `task_id` immediately and all heavy work happens in a background worker. Progress and results flow through a **Redis Stream** per task, which the client reads via long-polling with a cursor (`last_id`) — so a dropped connection or page refresh resumes exactly where it left off, something plain SSE can't do without extra bookkeeping.
 
-It expresses one invariant — *if it fits in a single chunk, don't chunk* — and stays correct if
-the chunk sizing is ever retuned.
+## The Transcription Pipeline
 
-### Chunk layout: progressive sizing with overlap
+### Scatter-gather over overlapping chunks
 
-Chunks are not uniform. The first is the shortest so the first text reaches the user soonest;
-later chunks grow to amortise per-call overhead. Consecutive chunks overlap by 5 seconds so that
-a sentence cut at a boundary appears **complete** in both neighbours.
-
-| Chunk | Range | Length | Overlaps previous by |
-|---|---|---|---|
-| 0 | 0–120s | 120s | — |
-| 1 | 115–295s | 180s | 5s |
-| 2 | 290–530s | 240s | 5s |
-| 3+ | 525–705s, … | 180s | 5s |
-
-Each chunk starts 5 seconds before its predecessor ended. Zooming in on one boundary shows why
-that matters — without the overlap, a phrase split across the cut is incomplete on both sides:
-
-```
-                          110s   115s   120s   125s
- without overlap
-   chunk 0  ────────────────────────────┤          … 切成多個 chunk，chunk 之
-   chunk 1                              ├────────      間有五秒的 overlap …
-                                    the cut ↑          neither side is a whole phrase
-
- with 5s overlap
-   chunk 0  ────────────────────────────┤          … chunk 之間有五秒的 overlap
-   chunk 1                       ├───────────────      chunk 之間有五秒的 overlap …
-                                 └ 115s              both sides carry the whole phrase,
-                                                     consolidation drops the duplicate
-```
-
-### Consolidation: stitching the seams
-
-Chunk transcripts are tagged by index and handed to an LLM that removes the overlap and rejoins
-the broken sentence:
-
-```
-<chunk index="0">…chunk 之間有五秒的 overlap，這樣 consolidation 的時候才能把邊界的句子接起來。</chunk>
-<chunk index="1">這樣 consolidation 的時候才能把邊界的句子接起來。接下來是 parallel transcription…</chunk>
-```
-
-Chunks are transcribed concurrently under `asyncio.Semaphore(3)`, with exponential-backoff retry
-on connection and rate-limit errors.
-
-### Streaming: an event log, not a status field
-
-Because chunks finish at different times, partial transcripts exist long before the task does.
-To deliver them, progress is modelled as an **append-only event log** in a Redis Stream rather
-than a mutable status field. The client long-polls with a cursor and receives only what it has
-not seen.
+Long audio is sliced with ffmpeg into overlapping chunks that are transcribed **in parallel** (bounded by a semaphore), then stitched back together by a consolidation LLM that resolves the 5-second overlaps and unifies terminology across chunk boundaries.
 
 ```mermaid
-sequenceDiagram
-    participant C as Client
-    participant A as API
-    participant W as Worker
-    participant R as Redis Stream
+flowchart LR
+    A[Audio file] --> D{"duration<br/>≤ 120 s?"}
+    D -- "yes" --> S1["Single transcribe call<br/>(no slicing,<br/>no consolidation)"]
+    D -- "no" --> CH["Chunk plan<br/>120 s → 180 s → 240 s<br/>→ 180 s …<br/>5 s overlap"]
+    CH --> T1["Chunk 0<br/>transcribe"] & T2["Chunk 1<br/>transcribe"] & T3["Chunk N<br/>transcribe"]
+    T1 --> G["LLM consolidation<br/>dedupe overlaps<br/>+ unify terms"]
+    T2 -- "CHUNK_COMPLETED<br/>streamed as<br/>each finishes" --> G
+    T3 --> G
 
-    C->>A: POST /transcribe-tasks
-    A-->>C: { task_id }
-    A->>W: schedule (background)
-    W->>R: TASK_QUEUED
-    W->>R: TASK_STARTED { total_chunks }
-    C->>A: GET /transcribe-tasks/{id}?last_id=0-0
-    W->>R: CHUNK_COMPLETED { chunk_index, text }
-    A-->>C: messages + last_id
-    Note over C: render partial text
-    W->>R: CHUNKS_CONSOLIDATING
-    W->>R: PUNC_FIXING / REFINING
-    W->>R: TASK_FINISHED { final_result }
-    C->>A: GET …?last_id=4-0
-    A-->>C: final messages
+    S1 --> CT["Consolidated<br/>transcript"]
+    G --> CT
+
+    classDef code fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
+    classDef llm fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef gate fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    classDef final fill:#dcfce7,stroke:#16a34a,color:#14532d
+    class A,CH,CT code
+    class S1,T1,T2,T3,G llm
+    class D gate
 ```
 
-| Event | Payload |
+The consolidated transcript then goes through mode-specific post-processing — note that the LLM boxes below only run when the mode (or the quality gate) demands them:
+
+```mermaid
+flowchart LR
+    CT["Consolidated<br/>transcript"] --> M{"mode?"}
+    M -- "fast" --> OUT[Final transcript]
+    M -- "standard" --> PG{"punctuation<br/>health gate"}
+    PG -- "healthy" --> OUT
+    PG -- "unhealthy" --> FIX["LLM punctuation<br/>repair"] --> OUT
+    M -- "refined" --> REF["LLM<br/>refinement"] --> OUT
+
+    classDef code fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
+    classDef llm fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef gate fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    classDef final fill:#dcfce7,stroke:#16a34a,color:#14532d
+    class CT code
+    class FIX,REF llm
+    class M,PG gate
+    class OUT final
+```
+
+Color legend: 🟦 deterministic code · 🟪 LLM call · 🟨 decision gate · 🟩 output
+
+Design choices worth noting:
+
+| Choice | Why |
 |---|---|
-| `TASK_QUEUED` | — |
-| `TASK_STARTED` | `total_chunks` |
-| `CHUNK_COMPLETED` | `chunk_index`, `text` |
-| `CHUNKS_CONSOLIDATING` | — |
-| `PUNC_FIXING` / `REFINING` | `consolidated_text` |
-| `TASK_FINISHED` | `final_result` |
-| `TASK_FAILED` | `error` |
+| **Warm-up chunk sizes** (120 s, 180 s, 240 s, then 180 s steady-state) | The first chunk finishes fastest → first visible text in ~7 s, while later, larger chunks keep the total API-call count low |
+| **5 s overlap between chunks** | A cut mid-word would corrupt both sides; the overlap gives the consolidation LLM context to stitch seamlessly |
+| **LLM consolidation instead of string concat** | Overlap dedup is not a string problem — the same speech transcribes slightly differently in two chunks; terminology can also drift between chunks |
+| **Duration probe with decode fallback** | Some containers carry no duration header; the probe falls back to decoding (run in an executor so it never blocks the event loop) |
+| **≤ 120 s → single call** | Slicing a file that fits in the first chunk would just re-encode it and run consolidation with nothing to stitch; the threshold is *derived from* the first chunk size, so the two can't drift apart |
 
-The single-call path emits the same events minus `CHUNKS_CONSOLIDATING`, reporting
-`total_chunks: 1`. Clients therefore never need to know which path the backend took.
+### Code + LLM fallback: cost-tiered post-processing
 
-### Post-processing modes
+LangSmith traces showed ~25% of raw transcripts had quality issues (missing punctuation, simplified characters, cramped 中英 boundaries). Fixing everything with an LLM would be expensive *and* unstable — the repair model itself sometimes misbehaves. So post-processing is tiered:
 
-Both paths converge here. The design keeps deterministic work in code and escalates to an LLM
-only where judgement is actually required.
-
-| Mode | Behaviour |
-|---|---|
-| `FAST` | Code only: Simplified → Traditional, spacing between Chinese and Latin text |
-| `STANDARD` | Code, plus a heuristic punctuation-health check that gates a conditional LLM repair |
-| `REFINED` | Code, plus an unconditional LLM polish pass |
-
-### Measuring duration
-
-Browser `MediaRecorder` uploads stream their container as they record and never write a duration
-header, so `ffprobe` returns an empty format object for them. The probe falls back to decoding
-the file through the null muxer and reading the final progress timestamp. Because that decodes
-the whole file, the probe runs in an executor rather than on the event loop.
-
-## API
-
-| Method | Path | Purpose |
+| Tier | Mechanism | Runs |
 |---|---|---|
-| `POST` | `/transcribe-tasks?mode={fast\|standard\|refined}` | Accept audio, schedule the worker, return `task_id` |
-| `GET` | `/transcribe-tasks/{task_id}?last_id={cursor}` | Long-poll the event stream from a cursor |
-| `POST` | `/validate-openai-api-key` | Check a user-supplied key |
-| `GET` | `/livez` | Liveness probe |
+| 1. Deterministic code | Simplified→Traditional conversion (`zhconv`), 中英 spacing insertion, empty-markdown-fence normalization | **Always**, per chunk |
+| 2. Rule-based quality gate | Punctuation health heuristics (ending punctuation, semantic-units-per-punctuation ratio, short-text exemption) | Always, on the full transcript (`standard` mode) |
+| 3. Conditional LLM repair | `gpt-4.1-nano` punctuation fix / refinement, temperature 0 | **Only when the gate fails** (or in `refined` mode) |
 
-Request headers on `POST /transcribe-tasks`: `X-Device-Id`, `X-Audio-Duration`,
-`X-Consent-Data-Collection`, `X-Custom-Openai-Api-Key` (empty to use the free tier).
+Cheap deterministic code handles the common case; the LLM is a targeted fallback, invoked only when heuristics prove the output is broken. The gate outcome is recorded as trace metadata, so the fallback rate is measurable, not guessed.
 
-## Configuration
+### Silence-hallucination guard
 
-Environment variables:
+Transcription models hallucinate plausible sentences on silent input, and the consolidation model can amplify that. Two layers prevent it:
 
-| Variable | Purpose |
+1. Per chunk: responses that are only an empty markdown fence (```` ```plaintext ``` ````) are normalized to empty strings and tagged as silent in the trace.
+2. Whole task: if **every** chunk is silent, the consolidation LLM call is skipped entirely and the result is `""` — no LLM ever sees the empty input.
+
+## Transcribe Modes
+
+| Mode | Per-chunk code post-processing | Consolidation | Punctuation gate + repair | LLM refinement |
+|---|:-:|:-:|:-:|:-:|
+| `fast` | ✅ | ✅ | — | — |
+| `standard` | ✅ | ✅ | ✅ | — |
+| `refined` | ✅ | ✅ | — | ✅ |
+
+## Observability
+
+Every stage is a named LangSmith run: `LLM1_Transcribe`, `LLM2_Consolidate_Chunks_Text`, `LLM2a_Fix_Punctuation`, `LLM2b_Refine_Transcript`, plus tool-level runs for each deterministic post-processor. Per-chunk transcripts, silence flags, gate decisions, and model names are attached as run metadata — which is what made the 25% failure-rate diagnosis (and the resulting architecture) possible in the first place.
+
+## Tech Stack
+
+| Layer | Choice |
 |---|---|
-| `FREE_TIER_OPENAI_API_KEY` | Key used when the caller supplies none |
-| `API_KEY_ENCRYPTION_PRIVATE_KEY` | RSA private key for decrypting user-supplied keys |
-| `REDIS_URL` | Defaults to `redis://localhost:6379/0` |
-| `ALLOWED_ORIGINS` | Comma-separated CORS origins |
-| `LANGSMITH_TRACING` | `true` to enable tracing |
+| API | FastAPI (async), Pydantic v2 |
+| Task streaming | Redis Streams (`XADD` / blocking `XREAD`), long-polling with cursor |
+| Audio | ffmpeg (slicing, duration probe with decode fallback) |
+| LLM | OpenAI `gpt-4o-mini-transcribe` + `gpt-4.1-nano` (repair/consolidation, temp 0) |
+| Resilience | `tenacity` retries (exponential backoff on connection/rate-limit errors), worker semaphore |
+| Observability | LangSmith (`@traceable`, `wrap_openai`, run-tree metadata) |
+| Storage | Cloudflare R2 (consent-gated audio capture) |
+| Security | RSA (PKCS1v15) encrypted BYO API keys |
+| Packaging | Docker (python-alpine + ffmpeg), docker-compose with Redis |
 
-Pipeline tuning lives in `app/config.py`:
-
-| Constant | Meaning |
-|---|---|
-| `INITIAL_CONCURRENT_CHUNK_DURATIONS_SECONDS` | Length of the first chunks, shortest first |
-| `SUBSEQUENT_CHUNK_DURATION_SECONDS` | Length of every chunk after those |
-| `AUDIO_CHUNK_OVERLAP_MS` | Overlap between neighbouring chunks |
-| `MAX_CONCURRENT_TRANSCRIBE_WORKERS` | Semaphore bound on parallel transcription |
-| `SHORT_AUDIO_MAX_DURATION_MS` | Derived; do not hardcode |
-
-## Layout
+## Project Layout
 
 ```
 app/
-├── routers/      HTTP surface only
-├── workers/      task orchestration — routing, scatter-gather
-├── pipelines/    transcription steps and their tracing
-├── services/     LLM client, Redis stream, audio storage
-├── lib/          pure helpers — ffmpeg wrappers, text processing
-├── prompts/      LLM instructions as text files
-└── tests/
+├── main.py                  # FastAPI app, lifespan-managed Redis connection
+├── config.py                # models, chunk sizing, quotas, thresholds — all in one place
+├── dependencies.py          # DI chain: file validation → usage config → rate limiting
+├── models.py                # Pydantic/TypedDict models, stream event contract
+├── routers/
+│   ├── transcribe.py        # POST /transcribe-tasks + long-polling progress endpoint
+│   ├── api_key.py           # BYO-key validity check
+│   └── livez.py             # health probe
+├── workers/
+│   └── transcribe_worker.py # task orchestration: chunk planning, scatter-gather, mode dispatch
+├── pipelines/
+│   └── transcribe_pipeline.py # slice → transcribe → post-process → consolidate (traced)
+├── services/
+│   ├── transcribe_stream.py # Redis Stream event emitter/reader
+│   ├── llm_client.py        # all OpenAI calls, one traced function per model role
+│   └── audio_storage.py     # R2 capture
+├── lib/                     # pure helpers: audio tools, transcript processors, rate-limit rules
+├── prompts/                 # versioned prompt files, one per model role
+└── tests/                   # pytest suite (~45 tests) for pipeline, validation, API
 ```
 
-## Tests
+The boundary discipline: `routers` handle HTTP, `workers` orchestrate, `pipelines` own the transcription domain flow, `services` wrap external systems, `lib` is pure logic — which is also what keeps the pipeline unit-testable without a network.
+
+## Free Tier, Rate Limiting & Key Security
+
+Two ways to use the service:
+
+- **Bring your own OpenAI key** — the key is **RSA-encrypted in the browser** and only decrypted server-side (PEM private key from env); it never travels or logs in plaintext. No quotas.
+- **Free tier** (requires consent to data collection) — server-funded key, guarded by layered Redis quotas keyed by **both device ID and client IP** (IP resolved behind Cloudflare via `CF-Connecting-IP`):
+
+| Rule | Window | Limit |
+|---|---|---|
+| Single audio duration | per request | 30 min |
+| Per-device total duration | 24 h | 30 min |
+| Per-IP total duration | 24 h | 60 min |
+| Per-device transcribe count | 1 h | 5 |
+| Per-IP transcribe count | 1 h | 20 |
+
+All rules are checked in one Redis pipeline round-trip, then updated in a second — rejection messages include the exact retry time in Taipei timezone.
+
+Consent also gates two things: raw-audio capture to Cloudflare R2 (for building an evaluation dataset) and LangSmith tracing — users who don't consent are never traced.
+
+## Running Locally
+
+Requires Docker (ships with ffmpeg + Redis via compose).
+
+Create a `.env` with at least:
+
+| Variable | Purpose |
+|---|---|
+| `ALLOWED_ORIGINS` | CORS allowlist for the frontend |
+| `FREE_TIER_OPENAI_API_KEY` | Server-funded key for free-tier requests |
+| `API_KEY_ENCRYPTION_PRIVATE_KEY` | RSA private key (PEM) for decrypting BYO keys |
+| `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` | Tracing (optional) |
+| `R2_*` | Cloudflare R2 credentials for consent-gated audio capture (optional) |
 
 ```bash
-pytest app/tests/                                   # all
-pytest app/tests/test_transcribe_pipeline.py        # one file
-pytest app/tests/test_transcribe_pipeline.py::TestShortAudioBypassesChunking
+docker compose up --build
 ```
 
-Tracing is force-disabled in `conftest.py` so the suite never performs network I/O.
+API at `http://localhost:8003`, interactive docs at `/docs`.
 
-## Known limitations
+```bash
+# tests
+pytest app/tests -v
+```
 
-- The 25MB upload cap still applies; chunking removes the model's output ceiling, not the
-  upload limit.
-- A chunk that fails after retries fails the whole task — there is no per-chunk resume.
-- Consolidation occasionally leaves a boundary overlap unstitched when the overlapping text is a
-  short, non-distinctive phrase. Long distinctive overlaps stitch reliably. Deliberate speaker
-  repetition is preserved correctly, so this shows up as cosmetic duplication rather than
-  content loss.
+## Related Writing & Talks
+
+Deeper dives into the engineering decisions in this repo, by the author:
+
+- **"How I Designed a Code + LLM Hybrid Architecture to Fix Unstable AI Output Quality"** — cost-tiered optimization: deterministic code, prompt iteration, and error-rate-driven conditional LLM repair. ([Medium](https://medium.com/@wytdong/ai-application-%E9%96%8B%E7%99%BC%E5%AF%A6%E6%88%B0-%E6%88%91%E6%98%AF%E5%A6%82%E4%BD%95%E8%A8%AD%E8%A8%88-code-llm-%E6%B7%B7%E5%90%88%E6%9E%B6%E6%A7%8B-%E8%A7%A3%E6%B1%BA-openai-api-%E7%9A%84%E5%9B%9E%E6%87%89%E4%B8%8D%E7%A9%A9%E5%95%8F%E9%A1%8C-c71e1b36a6d1))
+- **Talk: Agent Observability & Evaluation** — tracing, evaluation datasets, and failure analysis for LLM systems. ([Slides](https://docs.google.com/presentation/d/103yxXhcqoV-vw3QB00NKDVfVbI41nchdMlZ3a702l6E/present))
