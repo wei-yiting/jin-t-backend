@@ -164,25 +164,6 @@ Transcription models hallucinate plausible sentences on silent input, and the co
 | `standard` | ✅ | ✅ | ✅ | — |
 | `refined` | ✅ | ✅ | — | ✅ |
 
-## Free Tier, Rate Limiting & Key Security
-
-Two ways to use the service:
-
-- **Bring your own OpenAI key** — the key is **RSA-encrypted in the browser** and only decrypted server-side (PEM private key from env); it never travels or logs in plaintext. No quotas.
-- **Free tier** (requires consent to data collection) — server-funded key, guarded by layered Redis quotas keyed by **both device ID and client IP** (IP resolved behind Cloudflare via `CF-Connecting-IP`):
-
-| Rule | Window | Limit |
-|---|---|---|
-| Single audio duration | per request | 30 min |
-| Per-device total duration | 24 h | 30 min |
-| Per-IP total duration | 24 h | 60 min |
-| Per-device transcribe count | 1 h | 5 |
-| Per-IP transcribe count | 1 h | 20 |
-
-All rules are checked in one Redis pipeline round-trip, then updated in a second — rejection messages include the exact retry time in Taipei timezone.
-
-Consent also gates two things: raw-audio capture to Cloudflare R2 (for building an evaluation dataset) and LangSmith tracing — users who don't consent are never traced.
-
 ## Observability
 
 Every stage is a named LangSmith run: `LLM1_Transcribe`, `LLM2_Consolidate_Chunks_Text`, `LLM2a_Fix_Punctuation`, `LLM2b_Refine_Transcript`, plus tool-level runs for each deterministic post-processor. Per-chunk transcripts, silence flags, gate decisions, and model names are attached as run metadata — which is what made the 25% failure-rate diagnosis (and the resulting architecture) possible in the first place.
@@ -227,6 +208,25 @@ app/
 ```
 
 The boundary discipline: `routers` handle HTTP, `workers` orchestrate, `pipelines` own the transcription domain flow, `services` wrap external systems, `lib` is pure logic — which is also what keeps the pipeline unit-testable without a network.
+
+## Free Tier, Rate Limiting & Key Security
+
+Two ways to use the service:
+
+- **Bring your own OpenAI key** — the key is **RSA-encrypted in the browser** and only decrypted server-side (PEM private key from env); it never travels or logs in plaintext. No quotas.
+- **Free tier** (requires consent to data collection) — server-funded key, guarded by layered Redis quotas keyed by **both device ID and client IP** (IP resolved behind Cloudflare via `CF-Connecting-IP`):
+
+| Rule | Window | Limit |
+|---|---|---|
+| Single audio duration | per request | 30 min |
+| Per-device total duration | 24 h | 30 min |
+| Per-IP total duration | 24 h | 60 min |
+| Per-device transcribe count | 1 h | 5 |
+| Per-IP transcribe count | 1 h | 20 |
+
+All rules are checked in one Redis pipeline round-trip, then updated in a second — rejection messages include the exact retry time in Taipei timezone.
+
+Consent also gates two things: raw-audio capture to Cloudflare R2 (for building an evaluation dataset) and LangSmith tracing — users who don't consent are never traced.
 
 ## Running Locally
 
