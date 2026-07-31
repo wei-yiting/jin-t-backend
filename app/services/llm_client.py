@@ -8,14 +8,11 @@ from app.config import (
     TRANSCRIBE_MODEL_NAME,
     PUNC_FIX_MODEL_NAME,
     REFINE_MODEL_NAME,
-    CHUNKS_CONSOLIDATION_MODEL_NAME,
     PUNC_FIX_TEMPERATURE,
     REFINE_TEMPERATURE,
-    CHUNKS_CONSOLIDATION_TEMPERATURE,
     PUNC_FIX_PROMPT_FILE_PATH,
     TRANSCRIBE_PROMPT_FILE_PATH,
     TRANSCRIPT_REFINE_PROMPT_FILE_PATH,
-    CHUNKS_CONSOLIDATION_PROMPT_FILE_PATH,
 )
 from app.lib.prompt_utils import read_prompt
 
@@ -30,23 +27,6 @@ async def transcribe_audio_to_text(
         model=TRANSCRIBE_MODEL_NAME,
         file=(audio_file.filename, audio_file.file),
         prompt=transcript_prompt,
-    )
-
-
-@traceable(run_type="llm", name="LLM2_Consolidate_Chunks_Text")
-async def consolidate_chunks_text(
-    chunks_text_str: str,
-    client: Annotated[AsyncOpenAI, Depends(wrap_openai)],
-):
-    # Primary task: remove duplicate text between chunks
-    # Secondary task: make terminological consistency between chunks
-    # Optional task: perform punctuation correction
-    chunks_consolidation_instruction = read_prompt(CHUNKS_CONSOLIDATION_PROMPT_FILE_PATH)
-    return await client.responses.create(
-        model=CHUNKS_CONSOLIDATION_MODEL_NAME,
-        instructions=chunks_consolidation_instruction,
-        input=chunks_text_str,
-        temperature=CHUNKS_CONSOLIDATION_TEMPERATURE,
     )
 
 

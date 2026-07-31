@@ -16,7 +16,6 @@ async def lifespan(app: FastAPI):
 
     # Create redis instance and store it in the app state
     # Synchrounous operation, only setting up parameters, no connection is established yet
-    # `decode_responses=True` => command inputs/outputs are `str` instead of `bytes`.
     app.state.redis = Redis.from_url(redis_url, decode_responses=True)
 
     # Test connection
