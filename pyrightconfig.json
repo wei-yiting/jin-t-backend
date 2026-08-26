@@ -1,0 +1,13 @@
+{
+  "include": ["app"],
+  "exclude": [
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/.venv",
+    "**/venv",
+    "**/.mypy_cache"
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": "none"
+}

@@ -1,3 +1,5 @@
+import os
+
 # Model names
 TRANSCRIBE_MODEL_NAME = "gpt-4o-mini-transcribe"
 PUNC_FIX_MODEL_NAME = "gpt-4.1-nano"
@@ -33,5 +35,16 @@ FREE_TIER_SINGLE_IP_1H_MAX_TRANSCRIBE_COUNT = (
     20  # higher than device limit in case multiple users use the same IP
 )
 
-# Task progress
-TRANSCRIBE_TASK_PROGRESS_TTL = 30 * 60  # 30 minutes
+# Transcribe task
+TRANSCRIBE_STREAM_EVENT_TTL = 30 * 60  # 30 minutes
+TEMP_AUDIO_FILES_DIR = "/tmp/audio_processing"
+
+# The transcription API infers the container format from the filename it is
+# given, so a stored upload must keep the extension it arrived with. Anything
+# outside this set is rejected rather than guessed at.
+# https://platform.openai.com/docs/guides/speech-to-text
+SUPPORTED_AUDIO_EXTENSIONS = frozenset(
+    {".flac", ".m4a", ".mp3", ".mp4", ".mpeg", ".mpga", ".oga", ".ogg", ".wav", ".webm"}
+)
+
+os.makedirs(TEMP_AUDIO_FILES_DIR, exist_ok=True)

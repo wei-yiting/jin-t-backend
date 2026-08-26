@@ -1,23 +1,28 @@
-from fastapi import UploadFile
-from langsmith import traceable
+from pathlib import PurePosixPath
 
-from app.models import AudioMetadataFromRequest
+from fastapi import HTTPException
+
+from app.config import SUPPORTED_AUDIO_EXTENSIONS
 
 
-@traceable(run_type="tool", name="Get_Audio_File_Metadata")
-def get_audio_metadata(audio_file: UploadFile) -> AudioMetadataFromRequest:
-    content_type = audio_file.content_type
-    raw_file = audio_file.file
+def resolve_audio_file_extension(filename: str | None) -> str:
+    """Return the uploaded file's extension, validated against what the
+    transcription API accepts.
 
-    # Get file size (Bytes)
-    raw_file.seek(0, 2)
-    file_size_bytes = raw_file.tell()
-    raw_file.seek(0)
+    The stored file must keep this extension: the transcription API infers the
+    container format from the filename, so writing a `.webm` upload to a
+    `.mp3` path makes it reject the audio as corrupted.
+    """
+    # PurePosixPath keeps a client-supplied name from escaping the temp dir
+    extension = PurePosixPath(filename or "").suffix.lower()
 
-    return {
-        "audio_file_content_type": content_type,
-        "audio_file_size_mb": round(file_size_bytes / (1024 * 1024), 3),
-    }
+    if extension not in SUPPORTED_AUDIO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="不支援的音檔格式，請使用 mp3、wav、m4a、webm 等常見格式",
+        )
+
+    return extension
 
 
 def parse_audio_duration(audio_duration: str) -> float:

@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import TypedDict
+from typing import TypedDict, Any
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
@@ -11,52 +11,28 @@ class TranscribeMode(str, Enum):
     REFINED = "refined"
 
 
-class TaskStatus(str, Enum):
-    QUEUED = "queued"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
+class TranscribeStreamEventType(str, Enum):
+    TASK_QUEUED = "TASK_QUEUED"  # Payload: {}
+    TASK_STARTED = "TASK_STARTED"  # Payload: { total_chunks: int }
+    CHUNK_COMPLETED = (
+        "CHUNK_COMPLETED"  # Payload: TranscribedResultChunk { chunk_index: int, text: str }
+    )
+    CHUNKS_CONSOLIDATING = "CHUNKS_CONSOLIDATING"  # Payload: {}
+    PUNC_FIXING = "PUNC_FIXING"  # Payload: { consolidated_text: str }
+    REFINING = "REFINING"  # Payload: { consolidated_text: str }
+    TASK_FINISHED = "TASK_FINISHED"  # Payload: { final_result: str }
+    TASK_FAILED = "TASK_FAILED"  # Payload: { error: str }
 
 
-class TaskProcessingProgressCode(str, Enum):
-    TRANSCRIBING = "transcribing"
-    PUNC_FIXING = "punc_fixing"
-    REFINING = "refining"
-
-
-class TaskProgressResponse(BaseModel):
-    status: TaskStatus
-    progress_code: TaskProcessingProgressCode | None = None
-    message: str
-    transcript: str | None = None
-    error_detail: str | None = None
+class StreamEventResponse(BaseModel):
+    messages: list[dict[str, Any]]
+    last_id: str
 
 
 class TranscribeRequestMetadata(TypedDict, total=False):
     device_id: str
     request_id: str
     using_personal_api_key: bool
-
-
-class AudioMetadataFromRequest(TypedDict, total=False):
-    audio_file_content_type: str | None
-    audio_file_size_mb: float
-
-
-class LangsmithRunTreeMetadata(
-    AudioMetadataFromRequest, TranscribeRequestMetadata, total=False
-):
-    transcribe_mode: str
-    transcribe_model_name: str
-    raw_transcript: str
-    code_post_processed_transcript: str
-    audio_duration: float | None
-    has_punctuation_fixed: bool | None
-    punctuation_fixed_transcript: str | None
-    punc_fix_model_name: str | None
-    refined_transcript: str | None
-    refine_model_name: str | None
-    r2_object_key: str
 
 
 class CheckIsOpenaiApiKeyValidRequest(BaseModel):
@@ -92,7 +68,12 @@ class ValidatedAudioFile(BaseModel):
 class RateLimitRule:
     key: str
     window_ttl: int
-    max_duration: int | None = None 
+    max_duration: int | None = None
     max_count: int | None = None
     error_duration_msg: str = "分鐘的限制"
     error_count_msg: str = "次轉錄的限制"
+
+
+class TranscribedResultChunk(TypedDict):
+    chunk_index: int
+    text: str
