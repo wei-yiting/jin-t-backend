@@ -1,84 +1,46 @@
-"""Integration tests for transcribe endpoint."""
+"""Integration tests for the task-based transcribe endpoints."""
 
-import os
-import pytest
 from io import BytesIO
-from unittest.mock import AsyncMock, patch, MagicMock
-from fastapi.testclient import TestClient
-from openai import BadRequestError, AuthenticationError
 
-# Mock environment variable before importing main
-os.environ["FREE_TIER_OPENAI_API_KEY"] = "test-free-tier-openai-api-key"
-os.environ["ALLOWED_ORIGINS"] = "http://localhost:3000"
-
-from app.main import app
 from app.models import TranscribeMode
 
 
-@pytest.fixture
-def client():
-    """Create test client."""
-    return TestClient(app)
+FREE_TIER_HEADERS = {
+    "X-Device-Id": "valid-free-tier-device",
+    "X-Consent-Data-Collection": "true",
+    "X-Custom-Openai-Api-Key": "",
+    "X-Audio-Duration": "100",
+}
 
 
-@pytest.fixture
-def small_audio_file():
-    """Create a small valid audio file for testing."""
-    # Create a file > 100 bytes but < 25MB
-    audio_data = b"fake audio data" * 100  # ~1.5KB
-    return ("test_audio.mp3", BytesIO(audio_data), "audio/mpeg")
-
-
-@pytest.fixture
-def mock_transcription():
-    """Mock the transcription pipeline and OpenAI client."""
-    with (
-        patch("app.routers.transcribe.AsyncOpenAI") as mock_openai,
-        patch("app.routers.transcribe.run_transcribe_pipeline") as mock_pipeline,
-    ):
-        # Mock AsyncOpenAI client
-        mock_client = AsyncMock()
-        mock_openai.return_value = mock_client
-
-        # Mock transcription result
-        mock_pipeline.return_value = "This is a test transcription."
-
-        yield {"openai": mock_openai, "pipeline": mock_pipeline, "client": mock_client}
-
-
-class TestSuccessScenarios:
-    """Test successful request scenarios."""
+class TestStartTranscribeTask:
+    """POST /transcribe-tasks creates a task and schedules the worker."""
 
     def test_valid_free_tier_request(
-        self, client, small_audio_file, mock_transcription
+        self, client, small_audio_file, mock_task_infra
     ):
-        """Test valid free tier request succeeds."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
-            headers={
-                "X-Device-Id": "valid-free-tier-device",
-                "X-Consent-Data-Collection": "true",
-                "X-Custom-Openai-Api-Key": "",
-                "X-Audio-Duration": "100",
-            },
+            headers=FREE_TIER_HEADERS,
         )
 
         assert response.status_code == 200
-        assert "transcript" in response.json()
-        assert response.json()["transcript"] == "This is a test transcription."
+        task_id = response.json()["task_id"]
+        assert task_id
 
-        # Verify environment API key was used
-        mock_transcription["openai"].assert_called_with(
-            api_key="test-free-tier-openai-api-key"
-        )
+        # Worker constructed with the free-tier key and scheduled in background
+        worker_kwargs = mock_task_infra["worker_cls"].call_args.kwargs
+        assert worker_kwargs["openai_api_key"] == "test-free-tier-openai-api-key"
+        assert worker_kwargs["task_id"] == task_id
+        mock_task_infra["worker"].run.assert_awaited_once()
+        mock_task_infra["stream"].init_task.assert_awaited_once_with(task_id)
 
     def test_valid_custom_api_key_request(
-        self, client, small_audio_file, mock_transcription
+        self, client, small_audio_file, mock_task_infra
     ):
-        """Test valid custom API key request succeeds."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
             headers={
                 "X-Device-Id": "valid-custom-key-device",
@@ -89,231 +51,164 @@ class TestSuccessScenarios:
         )
 
         assert response.status_code == 200
-        assert "transcript" in response.json()
+        worker_kwargs = mock_task_infra["worker_cls"].call_args.kwargs
+        assert worker_kwargs["openai_api_key"] == "sk-test123"
 
-        # Verify custom API key was used
-        mock_transcription["openai"].assert_called_with(api_key="sk-test123")
+    def test_transcribe_mode_passed_to_worker(
+        self, client, small_audio_file, mock_task_infra
+    ):
+        for mode in ("fast", "standard", "refined"):
+            response = client.post(
+                f"/transcribe-tasks?mode={mode}",
+                files={"audio_file": small_audio_file},
+                headers=FREE_TIER_HEADERS,
+            )
+            assert response.status_code == 200
+            worker_kwargs = mock_task_infra["worker_cls"].call_args.kwargs
+            assert worker_kwargs["transcribe_mode"] == TranscribeMode(mode)
 
-    def test_transcribe_mode_fast(self, client, small_audio_file, mock_transcription):
-        """Test transcribe mode FAST."""
+    def test_consent_enabled_captures_audio_to_r2(
+        self, client, small_audio_file, mock_task_infra
+    ):
         response = client.post(
-            "/transcribe?mode=fast",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
-            headers={
-                "X-Device-Id": "test-device-123",
-                "X-Consent-Data-Collection": "true",
-                "X-Custom-Openai-Api-Key": "",
-                "X-Audio-Duration": "100",
-            },
+            headers=FREE_TIER_HEADERS,
         )
 
         assert response.status_code == 200
-        assert "transcript" in response.json()
+        mock_task_infra["storage"].generate_r2_object_key.assert_called_once()
+        mock_task_infra["storage"].capture_raw_audio.assert_awaited_once()
 
-        # Verify pipeline was called with correct mode
-        mock_transcription["pipeline"].assert_called_once()
-        call_args = mock_transcription["pipeline"].call_args
-        assert call_args.kwargs["transcribe_mode"] == TranscribeMode.FAST
+        # The captured content must be the full upload, not a residual chunk
+        capture_kwargs = mock_task_infra["storage"].capture_raw_audio.call_args.kwargs
+        assert capture_kwargs["file_content"] == b"fake audio data" * 100
 
-    def test_transcribe_mode_standard(
-        self, client, small_audio_file, mock_transcription
+        worker_kwargs = mock_task_infra["worker_cls"].call_args.kwargs
+        assert worker_kwargs["r2_object_key"] == "test-r2-key"
+
+    def test_no_consent_skips_r2_capture(
+        self, client, small_audio_file, mock_task_infra
     ):
-        """Test transcribe mode STANDARD."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
             headers={
-                "X-Device-Id": "test-device-123",
-                "X-Consent-Data-Collection": "true",
-                "X-Custom-Openai-Api-Key": "",
-                "X-Audio-Duration": "100",
-            },
-        )
-
-        assert response.status_code == 200
-        assert "transcript" in response.json()
-
-        # Verify pipeline was called with correct mode
-        mock_transcription["pipeline"].assert_called_once()
-        call_args = mock_transcription["pipeline"].call_args
-        assert call_args.kwargs["transcribe_mode"] == TranscribeMode.STANDARD
-
-    def test_transcribe_mode_refined(
-        self, client, small_audio_file, mock_transcription
-    ):
-        """Test transcribe mode REFINED."""
-        response = client.post(
-            "/transcribe?mode=refined",
-            files={"audio_file": small_audio_file},
-            headers={
-                "X-Device-Id": "test-device-123",
-                "X-Consent-Data-Collection": "true",
-                "X-Custom-Openai-Api-Key": "",
-                "X-Audio-Duration": "100",
-            },
-        )
-
-        assert response.status_code == 200
-        assert "transcript" in response.json()
-
-        # Verify pipeline was called with correct mode
-        mock_transcription["pipeline"].assert_called_once()
-        call_args = mock_transcription["pipeline"].call_args
-        assert call_args.kwargs["transcribe_mode"] == TranscribeMode.REFINED
-
-    def test_pipeline_receives_correct_parameters(
-        self, client, small_audio_file, mock_transcription
-    ):
-        """Test that pipeline receives correct parameters."""
-        audio_duration = "150.5"
-        transcribe_mode = TranscribeMode.STANDARD
-
-        response = client.post(
-            f"/transcribe?mode={transcribe_mode.value}",
-            files={"audio_file": small_audio_file},
-            headers={
-                "X-Device-Id": "test-device-123",
-                "X-Consent-Data-Collection": "true",
-                "X-Custom-Openai-Api-Key": "",
-                "X-Audio-Duration": audio_duration,
-            },
-        )
-
-        assert response.status_code == 200
-
-        # Verify pipeline was called with correct parameters
-        mock_transcription["pipeline"].assert_called_once()
-        call_args = mock_transcription["pipeline"].call_args
-
-        assert call_args.kwargs["transcribe_mode"] == transcribe_mode
-        assert call_args.kwargs["audio_duration"] == audio_duration
-        assert "audio_file" in call_args.kwargs
-        assert "llm_client" in call_args.kwargs
-
-
-class TestErrorHandling:
-    """Test error handling scenarios."""
-
-    def test_bad_request_error_corrupted_file(
-        self, client, small_audio_file, mock_transcription
-    ):
-        """Test BadRequestError with corrupted file message."""
-        # Mock BadRequestError with corrupted message
-        error = BadRequestError(
-            message="The audio file is corrupted or in an unsupported format",
-            response=MagicMock(),
-            body=None,
-        )
-        mock_transcription["pipeline"].side_effect = error
-
-        response = client.post(
-            "/transcribe?mode=standard",
-            files={"audio_file": small_audio_file},
-            headers={
-                "X-Device-Id": "test-device-123",
-                "X-Consent-Data-Collection": "true",
-                "X-Custom-Openai-Api-Key": "",
-                "X-Audio-Duration": "100",
-            },
-        )
-
-        assert response.status_code == 400
-        assert "corrupted or in an unsupported format" in response.json()["detail"]
-
-    def test_bad_request_error_unsupported_format(
-        self, client, small_audio_file, mock_transcription
-    ):
-        """Test BadRequestError with unsupported format message."""
-        # Mock BadRequestError with unsupported message
-        error = BadRequestError(
-            message="The audio format is unsupported",
-            response=MagicMock(),
-            body=None,
-        )
-        mock_transcription["pipeline"].side_effect = error
-
-        response = client.post(
-            "/transcribe?mode=standard",
-            files={"audio_file": small_audio_file},
-            headers={
-                "X-Device-Id": "test-device-123",
-                "X-Consent-Data-Collection": "true",
-                "X-Custom-Openai-Api-Key": "",
-                "X-Audio-Duration": "100",
-            },
-        )
-
-        assert response.status_code == 400
-        assert "corrupted or in an unsupported format" in response.json()["detail"]
-
-    def test_bad_request_error_other_message(
-        self, client, small_audio_file, mock_transcription
-    ):
-        """Test BadRequestError with other error message."""
-        # Mock BadRequestError with other message
-        error = BadRequestError(
-            message="Some other error occurred",
-            response=MagicMock(),
-            body=None,
-        )
-        mock_transcription["pipeline"].side_effect = error
-
-        response = client.post(
-            "/transcribe?mode=standard",
-            files={"audio_file": small_audio_file},
-            headers={
-                "X-Device-Id": "test-device-123",
-                "X-Consent-Data-Collection": "true",
-                "X-Custom-Openai-Api-Key": "",
-                "X-Audio-Duration": "100",
-            },
-        )
-
-        assert response.status_code == 400
-        assert "Some other error occurred" in response.json()["detail"]
-
-    def test_authentication_error(self, client, small_audio_file, mock_transcription):
-        """Test AuthenticationError handling."""
-        # Mock AuthenticationError
-        error = AuthenticationError(
-            message="Invalid API key",
-            response=MagicMock(),
-            body=None,
-        )
-        mock_transcription["pipeline"].side_effect = error
-
-        response = client.post(
-            "/transcribe?mode=standard",
-            files={"audio_file": small_audio_file},
-            headers={
-                "X-Device-Id": "test-device-123",
+                "X-Device-Id": "valid-custom-key-device",
                 "X-Consent-Data-Collection": "false",
-                "X-Custom-Openai-Api-Key": "sk-invalid-key",
+                "X-Custom-Openai-Api-Key": "sk-test123",
                 "X-Audio-Duration": "100",
             },
         )
 
-        assert response.status_code == 401
-        assert "Invalid OpenAI API key" in response.json()["detail"]
+        assert response.status_code == 200
+        mock_task_infra["storage"].capture_raw_audio.assert_not_awaited()
+        worker_kwargs = mock_task_infra["worker_cls"].call_args.kwargs
+        assert worker_kwargs["r2_object_key"] is None
 
-    def test_unexpected_exception(self, client, small_audio_file, mock_transcription):
-        """Test unexpected exception handling."""
-        # Mock unexpected exception
-        mock_transcription["pipeline"].side_effect = Exception("Unexpected error")
+
+class TestUploadFormatIsPreserved:
+    """Regression: the worker receives a path whose extension matches the
+    upload. Short audio is handed to the transcription API unmodified, and that
+    API infers the container format from the filename — storing a browser
+    `.webm` recording as `.mp3` makes it reject the audio as corrupted."""
+
+    def test_browser_webm_recording_keeps_its_extension(
+        self, client, mock_task_infra
+    ):
+        recording = ("recording.webm", BytesIO(b"fake webm data" * 100), "audio/webm")
 
         response = client.post(
-            "/transcribe?mode=standard",
-            files={"audio_file": small_audio_file},
-            headers={
-                "X-Device-Id": "test-device-123",
-                "X-Consent-Data-Collection": "true",
-                "X-Custom-Openai-Api-Key": "",
-                "X-Audio-Duration": "100",
-            },
+            "/transcribe-tasks?mode=standard",
+            files={"audio_file": recording},
+            headers=FREE_TIER_HEADERS,
         )
+
+        assert response.status_code == 200
+        file_path = mock_task_infra["worker"].run.await_args.kwargs["file_path"]
+        assert file_path.endswith(".webm"), file_path
+
+    def test_mp3_upload_keeps_its_extension(self, client, small_audio_file, mock_task_infra):
+        response = client.post(
+            "/transcribe-tasks?mode=standard",
+            files={"audio_file": small_audio_file},
+            headers=FREE_TIER_HEADERS,
+        )
+
+        assert response.status_code == 200
+        file_path = mock_task_infra["worker"].run.await_args.kwargs["file_path"]
+        assert file_path.endswith(".mp3"), file_path
+
+    def test_unsupported_format_is_rejected_with_400(self, client, mock_task_infra):
+        bad = ("notes.txt", BytesIO(b"not audio at all" * 100), "text/plain")
+
+        response = client.post(
+            "/transcribe-tasks?mode=standard",
+            files={"audio_file": bad},
+            headers=FREE_TIER_HEADERS,
+        )
+
+        assert response.status_code == 400
+        mock_task_infra["worker"].run.assert_not_awaited()
+
+
+class TestGetTaskProgress:
+    """GET /transcribe-tasks/{task_id} long-polls the event stream."""
+
+    def test_returns_parsed_stream_messages(self, client, mock_task_infra):
+        mock_task_infra["stream"].read_stream.return_value = [
+            (
+                "stream-key",
+                [
+                    (
+                        "1-0",
+                        {
+                            "event_type": "TASK_STARTED",
+                            "payload": '{"total_chunks": 3}',
+                        },
+                    ),
+                    (
+                        "2-0",
+                        {
+                            "event_type": "CHUNK_COMPLETED",
+                            "payload": '{"chunk_index": 0, "text": "hello"}',
+                        },
+                    ),
+                ],
+            )
+        ]
+
+        response = client.get("/transcribe-tasks/some-task-id?last_id=0-0")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["last_id"] == "2-0"
+        assert body["messages"] == [
+            {
+                "id": "1-0",
+                "type": "TASK_STARTED",
+                "payload": {"total_chunks": 3},
+            },
+            {
+                "id": "2-0",
+                "type": "CHUNK_COMPLETED",
+                "payload": {"chunk_index": 0, "text": "hello"},
+            },
+        ]
+
+    def test_empty_stream_returns_same_last_id(self, client, mock_task_infra):
+        mock_task_infra["stream"].read_stream.return_value = []
+
+        response = client.get("/transcribe-tasks/some-task-id?last_id=5-0")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["messages"] == []
+        assert body["last_id"] == "5-0"
+
+    def test_stream_error_returns_500(self, client, mock_task_infra):
+        mock_task_infra["stream"].read_stream.side_effect = Exception("redis down")
+
+        response = client.get("/transcribe-tasks/some-task-id")
 
         assert response.status_code == 500
-        assert (
-            "An unexpected error occurred during transcribe pipeline"
-            in response.json()["detail"]
-        )

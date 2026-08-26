@@ -4,7 +4,6 @@ import os
 import pytest
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
-from fastapi.testclient import TestClient
 
 # Mock environment variable before importing main
 os.environ["FREE_TIER_OPENAI_API_KEY"] = "test-free-tier-openai-api-key"
@@ -14,72 +13,10 @@ from app.main import app
 from app.config import MAX_AUDIO_FILE_SIZE_MB, FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS
 
 
-@pytest.fixture
-def client():
-    """Create test client."""
-    return TestClient(app)
-
-
-@pytest.fixture
-def small_audio_file():
-    """Create a small valid audio file for testing."""
-    # Create a file > 100 bytes but < 25MB
-    audio_data = b"fake audio data" * 100  # ~1.5KB
-    return ("test_audio.mp3", BytesIO(audio_data), "audio/mpeg")
-
-
-@pytest.fixture
-def large_audio_file():
-    """Create a large audio file exceeding 25MB limit."""
-    # Create a file > 25MB
-    file_size = int((MAX_AUDIO_FILE_SIZE_MB + 1) * 1024 * 1024)
-    audio_data = b"x" * file_size
-    return ("large_audio.mp3", BytesIO(audio_data), "audio/mpeg")
-
-
-@pytest.fixture
-def tiny_audio_file():
-    """Create a tiny audio file < 100 bytes."""
-    audio_data = b"x" * 50  # 50 bytes
-    return ("tiny_audio.mp3", BytesIO(audio_data), "audio/mpeg")
-
-
-@pytest.fixture
-def exactly_100_bytes_file():
-    """Create an audio file exactly 100 bytes."""
-    audio_data = b"x" * 100
-    return ("exact_100_bytes.mp3", BytesIO(audio_data), "audio/mpeg")
-
-
-@pytest.fixture
-def exactly_25mb_file():
-    """Create an audio file exactly 25MB."""
-    file_size = int(MAX_AUDIO_FILE_SIZE_MB * 1024 * 1024)
-    audio_data = b"x" * file_size
-    return ("exact_25mb.mp3", BytesIO(audio_data), "audio/mpeg")
-
-
-@pytest.fixture
-def mock_transcription():
-    """Mock the transcription pipeline and OpenAI client."""
-    with (
-        patch("app.routers.transcribe.AsyncOpenAI") as mock_openai,
-        patch("app.routers.transcribe.run_transcribe_pipeline") as mock_pipeline,
-    ):
-        # Mock AsyncOpenAI client
-        mock_client = AsyncMock()
-        mock_openai.return_value = mock_client
-
-        # Mock transcription result
-        mock_pipeline.return_value = "This is a test transcription."
-
-        yield {"openai": mock_openai, "pipeline": mock_pipeline, "client": mock_client}
-
-
 class TestAudioFileValidation:
     """Test audio file basic validation (filename and minimum size)."""
 
-    def test_no_filename_fails(self, client, mock_transcription):
+    def test_no_filename_fails(self, client, mock_task_infra):
         """Test that request fails when no filename is provided."""
         # FastAPI's File() validation rejects empty filename at parsing stage (422)
         # This happens before our validation logic can run, which is expected behavior
@@ -87,7 +24,7 @@ class TestAudioFileValidation:
         file_without_name = ("", BytesIO(audio_data), "audio/mpeg")
 
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": file_without_name},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -103,7 +40,7 @@ class TestAudioFileValidation:
     def test_file_too_small_fails(self, client, tiny_audio_file):
         """Test that file < 100 bytes is rejected."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": tiny_audio_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -117,11 +54,11 @@ class TestAudioFileValidation:
         assert "Audio file is too small or corrupted" in response.json()["detail"]
 
     def test_file_exactly_100_bytes_passes(
-        self, client, exactly_100_bytes_file, mock_transcription
+        self, client, exactly_100_bytes_file, mock_task_infra
     ):
         """Test that file exactly 100 bytes passes validation."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": exactly_100_bytes_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -132,18 +69,18 @@ class TestAudioFileValidation:
         )
 
         assert response.status_code == 200
-        assert "transcript" in response.json()
+        assert "task_id" in response.json()
 
 
 class TestFileSizeValidation:
     """Test file size validation for all users."""
 
     def test_file_size_exceeds_limit_with_custom_api_key(
-        self, client, large_audio_file, mock_transcription
+        self, client, large_audio_file, mock_task_infra
     ):
         """Test that file > 25MB is rejected even with custom API key."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": large_audio_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -160,11 +97,11 @@ class TestFileSizeValidation:
         )
 
     def test_file_size_exceeds_limit_with_free_tier(
-        self, client, large_audio_file, mock_transcription
+        self, client, large_audio_file, mock_task_infra
     ):
         """Test that file > 25MB is rejected for free tier users."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": large_audio_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -181,11 +118,11 @@ class TestFileSizeValidation:
         )
 
     def test_file_exactly_25mb_passes(
-        self, client, exactly_25mb_file, mock_transcription
+        self, client, exactly_25mb_file, mock_task_infra
     ):
         """Test that file exactly 25MB passes validation."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": exactly_25mb_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -196,14 +133,14 @@ class TestFileSizeValidation:
         )
 
         assert response.status_code == 200
-        assert "transcript" in response.json()
+        assert "task_id" in response.json()
 
     def test_file_smaller_than_25mb_passes(
-        self, client, small_audio_file, mock_transcription
+        self, client, small_audio_file, mock_task_infra
     ):
         """Test that file < 25MB passes validation."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -214,7 +151,7 @@ class TestFileSizeValidation:
         )
 
         assert response.status_code == 200
-        assert "transcript" in response.json()
+        assert "task_id" in response.json()
 
 
 class TestConsentAndApiKeyValidation:
@@ -223,7 +160,7 @@ class TestConsentAndApiKeyValidation:
     def test_no_consent_no_api_key_fails(self, client, small_audio_file):
         """Test that request fails when no consent and no API key."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -248,7 +185,7 @@ class TestConsentAndApiKeyValidation:
 
         try:
             response = client.post(
-                "/transcribe?mode=standard",
+                "/transcribe-tasks?mode=standard",
                 files={"audio_file": small_audio_file},
                 headers={
                     "X-Device-Id": "test-device-123",
@@ -275,13 +212,13 @@ class TestAudioDurationValidation:
     """Test audio duration validation for free tier."""
 
     def test_free_tier_audio_duration_exceeds_limit(
-        self, client, small_audio_file, mock_transcription
+        self, client, small_audio_file, mock_task_infra
     ):
-        """Test that audio > 10 minutes is rejected for free tier."""
+        """Test that audio over the free-tier duration limit is rejected."""
         duration_over_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS + 1
 
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -293,16 +230,17 @@ class TestAudioDurationValidation:
 
         assert response.status_code == 400
         assert "Audio duration exceeds the maximum limit" in response.json()["detail"]
-        assert "10 minutes" in response.json()["detail"]
+        max_minutes = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS // 60
+        assert f"{max_minutes} minutes" in response.json()["detail"]
 
     def test_free_tier_audio_duration_exactly_at_limit_passes(
-        self, client, small_audio_file, mock_transcription
+        self, client, small_audio_file, mock_task_infra
     ):
         """Test that audio exactly 30 minutes passes for free tier."""
         duration_at_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS
 
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -313,16 +251,16 @@ class TestAudioDurationValidation:
         )
 
         assert response.status_code == 200
-        assert "transcript" in response.json()
+        assert "task_id" in response.json()
 
     def test_free_tier_audio_duration_below_limit_passes(
-        self, client, small_audio_file, mock_transcription
+        self, client, small_audio_file, mock_task_infra
     ):
         """Test that audio < 30 minutes passes for free tier."""
         duration_below_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS - 100
 
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -333,16 +271,16 @@ class TestAudioDurationValidation:
         )
 
         assert response.status_code == 200
-        assert "transcript" in response.json()
+        assert "task_id" in response.json()
 
     def test_custom_api_key_no_duration_limit(
-        self, client, small_audio_file, mock_transcription
+        self, client, small_audio_file, mock_task_infra
     ):
         """Test that audio > 30 minutes is allowed with custom API key."""
         duration_over_limit = FREE_TIER_SINGLE_AUDIO_MAX_DURATION_SECONDS + 100
 
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -353,14 +291,14 @@ class TestAudioDurationValidation:
         )
 
         assert response.status_code == 200
-        assert "transcript" in response.json()
+        assert "task_id" in response.json()
 
     def test_invalid_duration_format_continues_without_validation(
-        self, client, small_audio_file, mock_transcription
+        self, client, small_audio_file, mock_task_infra
     ):
         """Test that invalid duration format continues without validation."""
         response = client.post(
-            "/transcribe?mode=standard",
+            "/transcribe-tasks?mode=standard",
             files={"audio_file": small_audio_file},
             headers={
                 "X-Device-Id": "test-device-123",
@@ -372,4 +310,4 @@ class TestAudioDurationValidation:
 
         # Should pass validation and proceed (will fail at pipeline if needed)
         assert response.status_code == 200
-        assert "transcript" in response.json()
+        assert "task_id" in response.json()
