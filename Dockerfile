@@ -1,5 +1,7 @@
 FROM python:3.11.14-alpine3.22
 
+RUN apk add --no-cache ffmpeg
+
 WORKDIR /code
 
 COPY requirements.txt .
@@ -9,7 +11,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     
 COPY ./app /code/app
 
-EXPOSE 8000
+EXPOSE 10000
 
 # Render injects PORT=10000; DigitalOcean App Platform probes the EXPOSE
 # port, so the default must stay aligned with EXPOSE above.
